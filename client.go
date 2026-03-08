@@ -67,6 +67,17 @@ func WithNoCookieJar() Option {
 	}
 }
 
+// WithNoRedirects prevents the client from following HTTP redirects.
+// The raw 3xx response is returned to the caller.
+func WithNoRedirects() Option {
+	return func(c *Client) { c.noRedirects = true }
+}
+
+// WithMaxRedirects sets the maximum number of redirects to follow (default: 10).
+func WithMaxRedirects(n int) Option {
+	return func(c *Client) { c.maxRedirects = n }
+}
+
 // ClientInfo holds the browser identity headers generated for the client.
 // Use these when setting headers on your requests to stay consistent with
 // the TLS/HTTP/2 fingerprint.
@@ -99,8 +110,10 @@ type Client struct {
 	insecure    bool
 	h2Browser   string
 	osVersion   string
-	jar         http.CookieJar
-	jarSet      bool // true if user explicitly set jar (even to nil)
+	jar          http.CookieJar
+	jarSet       bool // true if user explicitly set jar (even to nil)
+	noRedirects  bool
+	maxRedirects int
 }
 
 // NewClientWithPreset creates a Client that mimics a specific browser version.
@@ -142,7 +155,12 @@ func NewClientWithPreset(browser, version, platform string, opts ...Option) (*Cl
 	}
 
 	c.transport = base
-	c.httpClient = &http.Client{Transport: transport, Timeout: c.timeout, Jar: c.resolveJar()}
+	c.httpClient = &http.Client{
+		Transport:     transport,
+		Timeout:       c.timeout,
+		Jar:           c.resolveJar(),
+		CheckRedirect: c.redirectPolicy(),
+	}
 	c.Info = ClientInfo{
 		UserAgent:       headers.Get("user-agent"),
 		SecChUA:         headers.Get("sec-ch-ua"),
@@ -195,7 +213,12 @@ func NewClientWithJA3(ja3String string, opts ...Option) (*Client, error) {
 	}
 
 	c.transport = base
-	c.httpClient = &http.Client{Transport: transport, Timeout: c.timeout, Jar: c.resolveJar()}
+	c.httpClient = &http.Client{
+		Transport:     transport,
+		Timeout:       c.timeout,
+		Jar:           c.resolveJar(),
+		CheckRedirect: c.redirectPolicy(),
+	}
 	return c, nil
 }
 
@@ -236,6 +259,24 @@ func (c *Client) validate() error {
 		case "http", "https", "socks5", "socks5h":
 		default:
 			return fmt.Errorf("unsupported proxy scheme %q (use: http, https, socks5)", u.Scheme)
+		}
+	}
+	return nil
+}
+
+func (c *Client) redirectPolicy() func(*http.Request, []*http.Request) error {
+	if c.noRedirects {
+		return func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+	if c.maxRedirects > 0 {
+		max := c.maxRedirects
+		return func(_ *http.Request, via []*http.Request) error {
+			if len(via) >= max {
+				return fmt.Errorf("stopped after %d redirects", max)
+			}
+			return nil
 		}
 	}
 	return nil
