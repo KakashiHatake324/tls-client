@@ -135,9 +135,14 @@ func buildBaseTransport(c *Client) *http.Transport {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
+	if c.insecure {
+		t.TLSClientConfig = &utls.Config{InsecureSkipVerify: true}
+	}
+
 	if c.proxyURL != "" {
+		proxyURL := c.proxyURL
 		t.Proxy = func(req *http.Request) (*url.URL, error) {
-			return url.Parse(c.proxyURL)
+			return url.Parse(proxyURL)
 		}
 	}
 

@@ -73,6 +73,13 @@ func chromiumProfile(brand, version, osVersion string, platform Platform) (*brow
 		h2 = chromiumH2Profile(majorNum)
 	}
 
+	if majorNum < 132 && !isAppleMobile {
+		id := chromiumTLSHelloID(majorNum, isAndroid)
+		if _, err := utls.UTLSIdToSpec(id); err != nil {
+			return nil, fmt.Errorf("chromium %s: unsupported TLS preset: %w", version, err)
+		}
+	}
+
 	return &browserProfile{
 		h2: h2,
 		specFn: func(p Platform) (func() *utls.ClientHelloSpec, error) {
@@ -770,6 +777,7 @@ func safariMacTLSSpec() *utls.ClientHelloSpec {
 				utls.CurveP521,
 			}},
 			&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}},
+			&utls.SessionTicketExtension{},
 			&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
 			&utls.StatusRequestExtension{},
 			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{

@@ -3,6 +3,7 @@ package tlsclient
 import (
 	"fmt"
 	"math/rand/v2"
+	"net/url"
 	"strings"
 	"time"
 
@@ -121,6 +122,10 @@ func NewClientWithPreset(browser, version, platform string, opts ...Option) (*Cl
 		o(c)
 	}
 
+	if err := c.validate(); err != nil {
+		return nil, fmt.Errorf("tlsclient: %w", err)
+	}
+
 	profile, err := lookupProfile(browser, version, c.osVersion, Platform(platform))
 	if err != nil {
 		return nil, fmt.Errorf("tlsclient: %w", err)
@@ -171,6 +176,10 @@ func NewClientWithJA3(ja3String string, opts ...Option) (*Client, error) {
 		o(c)
 	}
 
+	if err := c.validate(); err != nil {
+		return nil, fmt.Errorf("tlsclient: %w", err)
+	}
+
 	if _, err := ja3.ToClientHelloSpec(ja3String); err != nil {
 		return nil, fmt.Errorf("tlsclient: %w", err)
 	}
@@ -215,6 +224,21 @@ func (c *Client) HTTPClient() *http.Client {
 func (c *Client) applyDefaults() {
 	c.timeout = 30 * time.Second
 	c.dialTimeout = 10 * time.Second
+}
+
+func (c *Client) validate() error {
+	if c.proxyURL != "" {
+		u, err := url.Parse(c.proxyURL)
+		if err != nil {
+			return fmt.Errorf("invalid proxy URL: %w", err)
+		}
+		switch u.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("unsupported proxy scheme %q (use: http, https, socks5)", u.Scheme)
+		}
+	}
+	return nil
 }
 
 func (c *Client) resolveJar() http.CookieJar {
