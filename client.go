@@ -42,6 +42,13 @@ func WithH2Profile(browser string) Option {
 	return func(c *Client) { c.h2Browser = browser }
 }
 
+// WithOSVersion sets the OS version for mobile platforms (iOS, iPadOS, Android).
+// Used in the User-Agent string. For iOS/iPadOS: "18.3", "26.3.0". For Android: "14".
+// If not set, defaults to "18.3" for iOS/iPadOS and "14" for Android.
+func WithOSVersion(v string) Option {
+	return func(c *Client) { c.osVersion = v }
+}
+
 // WithCookieJar sets a custom cookie jar. By default a new jar is created
 // automatically (like a real browser). Pass nil to disable cookie handling.
 func WithCookieJar(jar http.CookieJar) Option {
@@ -90,6 +97,7 @@ type Client struct {
 	proxyURL    string
 	insecure    bool
 	h2Browser   string
+	osVersion   string
 	jar         http.CookieJar
 	jarSet      bool // true if user explicitly set jar (even to nil)
 }
@@ -113,7 +121,7 @@ func NewClientWithPreset(browser, version, platform string, opts ...Option) (*Cl
 		o(c)
 	}
 
-	profile, err := lookupProfile(browser, version)
+	profile, err := lookupProfile(browser, version, c.osVersion, Platform(platform))
 	if err != nil {
 		return nil, fmt.Errorf("tlsclient: %w", err)
 	}
@@ -222,20 +230,22 @@ func (c *Client) Jar() http.CookieJar {
 	return c.httpClient.Jar
 }
 
-func lookupProfile(browser, version string) (*browserProfile, error) {
+func lookupProfile(browser, version, osVersion string, platform Platform) (*browserProfile, error) {
 	switch strings.ToLower(strings.TrimSpace(browser)) {
 	case "chrome":
-		return chromiumProfile("Google Chrome", version)
+		return chromiumProfile("Google Chrome", version, osVersion, platform)
 	case "edge":
-		return chromiumProfile("Microsoft Edge", version)
+		return chromiumProfile("Microsoft Edge", version, osVersion, platform)
 	case "brave":
-		return chromiumProfile("Brave", version)
+		return chromiumProfile("Brave", version, osVersion, platform)
 	case "firefox":
 		return firefoxProfile(version)
 	case "safari":
-		return safariProfile(version)
+		return safariProfile(version, platform)
+	case "okhttp":
+		return okhttpProfile(version)
 	default:
-		return nil, fmt.Errorf("unsupported browser %q (use: chrome, edge, brave, firefox, safari)", browser)
+		return nil, fmt.Errorf("unsupported browser %q (use: chrome, edge, brave, firefox, safari, okhttp)", browser)
 	}
 }
 
@@ -246,7 +256,7 @@ func lookupH2Profile(browser string) (*h2Profile, error) {
 	case "firefox":
 		return firefoxH2Profile(), nil
 	case "safari":
-		return safariH2Profile(), nil
+		return safariMacH2Profile(), nil
 	default:
 		return nil, fmt.Errorf("unknown h2 profile %q (use: chrome, firefox, safari)", browser)
 	}

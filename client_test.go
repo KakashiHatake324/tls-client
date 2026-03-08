@@ -11,6 +11,7 @@ import (
 
 type peetResponse struct {
 	HTTPVersion string `json:"http_version"`
+	UserAgent   string `json:"user_agent"`
 	TLS         struct {
 		Ciphers              []string `json:"ciphers"`
 		TLSVersionNegotiated string   `json:"tls_version_negotiated"`
@@ -20,13 +21,19 @@ type peetResponse struct {
 		PeetprintHash        string   `json:"peetprint_hash"`
 	} `json:"tls"`
 	HTTP2 struct {
-		AkamaiFingerprint string `json:"akamai_fingerprint"`
-		SentFrames        []struct {
+		AkamaiFingerprint     string `json:"akamai_fingerprint"`
+		AkamaiFingerprintHash string `json:"akamai_fingerprint_hash"`
+		SentFrames            []struct {
 			FrameType string   `json:"frame_type"`
 			Settings  []string `json:"settings,omitempty"`
 			Increment int      `json:"increment,omitempty"`
 			Headers   []string `json:"headers,omitempty"`
 			Flags     []string `json:"flags,omitempty"`
+			Priority  *struct {
+				Weight    int  `json:"weight"`
+				DependsOn int  `json:"depends_on"`
+				Exclusive int  `json:"exclusive"`
+			} `json:"priority,omitempty"`
 		} `json:"sent_frames"`
 	} `json:"http2"`
 }
@@ -42,7 +49,7 @@ func fetchPeet(t *testing.T, c *Client) peetResponse {
 
 	resp, err := c.Do(req)
 	if err != nil {
-		t.Fatalf("do request: %v", err)
+		t.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -50,7 +57,6 @@ func fetchPeet(t *testing.T, c *Client) peetResponse {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d: %s", resp.StatusCode, string(body))
 	}
@@ -62,7 +68,56 @@ func fetchPeet(t *testing.T, c *Client) peetResponse {
 	return pr
 }
 
-func TestPresetChrome145(t *testing.T) {
+// verifyH2 checks HTTP/2 SETTINGS, WINDOW_UPDATE, pseudo-header order, and priority.
+func verifyH2(t *testing.T, pr peetResponse, wantAkamaiPrefix string, wantPseudoOrder string, wantPriority bool) {
+	t.Helper()
+
+	if pr.HTTPVersion != "h2" {
+		t.Errorf("http_version = %q, want h2", pr.HTTPVersion)
+	}
+
+	if !strings.HasPrefix(pr.HTTP2.AkamaiFingerprint, wantAkamaiPrefix) {
+		t.Errorf("akamai = %q\n  want prefix: %s", pr.HTTP2.AkamaiFingerprint, wantAkamaiPrefix)
+	}
+
+	// Check pseudo-header order from the HEADERS frame
+	if len(pr.HTTP2.SentFrames) >= 3 {
+		headers := pr.HTTP2.SentFrames[2].Headers
+		if len(headers) >= 4 {
+			got := pseudoOrder(headers[:4])
+			if got != wantPseudoOrder {
+				t.Errorf("pseudo-header order = %q, want %q", got, wantPseudoOrder)
+			}
+		}
+
+		if wantPriority {
+			hasPriority := false
+			for _, f := range pr.HTTP2.SentFrames[2].Flags {
+				if strings.Contains(f, "Priority") {
+					hasPriority = true
+				}
+			}
+			if !hasPriority {
+				t.Error("HEADERS frame missing Priority flag")
+			}
+		}
+	}
+}
+
+func pseudoOrder(headers []string) string {
+	var parts []string
+	for _, h := range headers {
+		key := strings.SplitN(h, ":", 3)[1]
+		parts = append(parts, key[0:1])
+	}
+	return strings.Join(parts, ",")
+}
+
+// ---------------------------------------------------------------------------
+// Chrome 145 desktop
+// ---------------------------------------------------------------------------
+
+func TestPresetChrome145Mac(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
@@ -75,56 +130,45 @@ func TestPresetChrome145(t *testing.T) {
 
 	pr := fetchPeet(t, c)
 
-	if pr.TLS.TLSVersionNegotiated != "772" {
-		t.Errorf("tls version = %q, want 772", pr.TLS.TLSVersionNegotiated)
-	}
-
-	if pr.HTTPVersion != "h2" {
-		t.Errorf("http_version = %q, want h2", pr.HTTPVersion)
-	}
-
-	// Chrome peetprint should match real Chrome
+	// TLS: must match real Chrome 145 peetprint and JA4
 	if pr.TLS.PeetprintHash != "1d4ffe9b0e34acac0bd883fa7f79d7b5" {
 		t.Errorf("peetprint_hash = %q, want 1d4ffe9b0e34acac0bd883fa7f79d7b5", pr.TLS.PeetprintHash)
 	}
-
-	// JA4 should match real Chrome (stable across extension shuffling)
 	if pr.TLS.JA4 != "t13d1516h2_8daaf6152771_d8a2da3f94cd" {
 		t.Errorf("ja4 = %q, want t13d1516h2_8daaf6152771_d8a2da3f94cd", pr.TLS.JA4)
 	}
 
-	// HTTP/2 SETTINGS should match Chrome (HEADER_TABLE_SIZE=65536, ENABLE_PUSH=0, INITIAL_WINDOW_SIZE=6291456, MAX_HEADER_LIST_SIZE=262144)
-	akamai := pr.HTTP2.AkamaiFingerprint
-	if !strings.HasPrefix(akamai, "1:65536;2:0;4:6291456;6:262144") {
-		t.Errorf("akamai fingerprint = %q, want prefix 1:65536;2:0;4:6291456;6:262144", akamai)
+	// HTTP/2: Chrome SETTINGS + m,a,s,p + priority
+	verifyH2(t, pr,
+		"1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+		"m,a,s,p",
+		true,
+	)
+
+	// Headers
+	if c.Info.SecChUA == "" {
+		t.Error("SecChUA should be set for Chrome")
+	}
+	if c.Info.SecChUAMobile != "?0" {
+		t.Errorf("SecChUAMobile = %q, want ?0", c.Info.SecChUAMobile)
 	}
 
-	// Pseudo-header order should be m,a,s,p (Chrome order)
-	if len(pr.HTTP2.SentFrames) >= 3 {
-		headers := pr.HTTP2.SentFrames[2].Headers
-		if len(headers) >= 4 {
-			if !strings.HasPrefix(headers[0], ":method") ||
-				!strings.HasPrefix(headers[1], ":authority") ||
-				!strings.HasPrefix(headers[2], ":scheme") ||
-				!strings.HasPrefix(headers[3], ":path") {
-				t.Errorf("pseudo-header order = %v, want m,a,s,p", headers[:4])
-			}
-		}
-	}
-
-	t.Logf("JA3: %s", pr.TLS.JA3)
 	t.Logf("JA3 Hash: %s", pr.TLS.JA3Hash)
 	t.Logf("JA4: %s", pr.TLS.JA4)
-	t.Logf("Peetprint Hash: %s", pr.TLS.PeetprintHash)
-	t.Logf("Akamai: %s", akamai)
+	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
+	t.Logf("Akamai Hash: %s", pr.HTTP2.AkamaiFingerprintHash)
 }
 
-func TestPresetFirefox(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Chrome mobile Android
+// ---------------------------------------------------------------------------
+
+func TestPresetChromeMobileAndroid(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
 
-	c, err := NewClientWithPreset("firefox", "120.0", "mac")
+	c, err := NewClientWithPreset("chrome", "145.0.0.0", "android")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -132,14 +176,136 @@ func TestPresetFirefox(t *testing.T) {
 
 	pr := fetchPeet(t, c)
 
-	if pr.HTTPVersion != "h2" {
-		t.Errorf("http_version = %q, want h2", pr.HTTPVersion)
+	// Same TLS as desktop Chrome
+	if pr.TLS.PeetprintHash != "1d4ffe9b0e34acac0bd883fa7f79d7b5" {
+		t.Errorf("peetprint_hash = %q, want 1d4ffe9b0e34acac0bd883fa7f79d7b5", pr.TLS.PeetprintHash)
 	}
 
-	t.Logf("JA3: %s", pr.TLS.JA3)
+	// Same HTTP/2 as desktop Chrome
+	verifyH2(t, pr,
+		"1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+		"m,a,s,p",
+		true,
+	)
+
+	if c.Info.SecChUAMobile != "?1" {
+		t.Errorf("SecChUAMobile = %q, want ?1 (mobile)", c.Info.SecChUAMobile)
+	}
+	if !strings.Contains(c.Info.UserAgent, "Mobile") {
+		t.Errorf("UA missing 'Mobile': %s", c.Info.UserAgent)
+	}
+
+	t.Logf("UA: %s", c.Info.UserAgent)
+	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
+}
+
+// ---------------------------------------------------------------------------
+// Firefox desktop
+// ---------------------------------------------------------------------------
+
+func TestPresetFirefoxMac(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	c, err := NewClientWithPreset("firefox", "134.0", "mac")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	if pr.TLS.TLSVersionNegotiated != "772" {
+		t.Errorf("tls version = %q, want 772", pr.TLS.TLSVersionNegotiated)
+	}
+
+	// HTTP/2: Firefox SETTINGS + m,p,a,s pseudo-order
+	verifyH2(t, pr,
+		"1:65536;4:131072;5:16384|12517377|0|m,p,a,s",
+		"m,p,a,s",
+		true,
+	)
+
+	// Firefox has no sec-ch-ua
+	if c.Info.SecChUA != "" {
+		t.Errorf("SecChUA should be empty for Firefox, got %q", c.Info.SecChUA)
+	}
+
 	t.Logf("JA4: %s", pr.TLS.JA4)
 	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
 }
+
+// ---------------------------------------------------------------------------
+// Safari macOS
+// ---------------------------------------------------------------------------
+
+func TestPresetSafariMac(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	c, err := NewClientWithPreset("safari", "18.3", "mac")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	// macOS Safari uses the original Safari H2 profile
+	verifyH2(t, pr,
+		"1:4096;2:0;3:100;4:2097152;5:16384;",
+		"m,s,p,a",
+		false,
+	)
+
+	if c.Info.SecChUA != "" {
+		t.Errorf("SecChUA should be empty for Safari, got %q", c.Info.SecChUA)
+	}
+	if !strings.Contains(c.Info.UserAgent, "Safari") {
+		t.Errorf("UA missing 'Safari': %s", c.Info.UserAgent)
+	}
+
+	t.Logf("JA4: %s", pr.TLS.JA4)
+	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
+}
+
+// ---------------------------------------------------------------------------
+// Safari iOS
+// ---------------------------------------------------------------------------
+
+func TestPresetSafariIOS(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	c, err := NewClientWithPreset("safari", "18.3", "ios")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	// iOS uses the newer iOS H2 profile with NO_RFC7540_PRIORITIES
+	verifyH2(t, pr,
+		"2:0;4:2097152;3:100;",
+		"m,s,p,a",
+		false,
+	)
+
+	if !strings.Contains(c.Info.UserAgent, "iPhone") {
+		t.Errorf("UA missing 'iPhone': %s", c.Info.UserAgent)
+	}
+
+	t.Logf("UA: %s", c.Info.UserAgent)
+	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
+}
+
+// ---------------------------------------------------------------------------
+// JA3 with Chrome H2
+// ---------------------------------------------------------------------------
 
 func TestJA3Chrome145(t *testing.T) {
 	if testing.Short() {
@@ -156,24 +322,55 @@ func TestJA3Chrome145(t *testing.T) {
 
 	pr := fetchPeet(t, c)
 
-	if pr.HTTPVersion != "h2" {
-		t.Errorf("http_version = %q, want h2", pr.HTTPVersion)
-	}
-
+	// Exact JA3 match (no extension shuffling in JA3 mode)
 	if pr.TLS.JA3 != chrome145JA3 {
 		t.Errorf("JA3 mismatch:\n  got:  %s\n  want: %s", pr.TLS.JA3, chrome145JA3)
 	}
 
-	// HTTP/2 should use Chrome settings (even in JA3 mode)
-	akamai := pr.HTTP2.AkamaiFingerprint
-	if !strings.HasPrefix(akamai, "1:65536;2:0;4:6291456;6:262144") {
-		t.Errorf("akamai fingerprint = %q, want prefix 1:65536;2:0;4:6291456;6:262144", akamai)
+	// HTTP/2 should use Chrome settings
+	verifyH2(t, pr,
+		"1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+		"m,a,s,p",
+		true,
+	)
+
+	t.Logf("JA3 Hash: %s", pr.TLS.JA3Hash)
+	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
+}
+
+// ---------------------------------------------------------------------------
+// JA3 with Firefox H2
+// ---------------------------------------------------------------------------
+
+func TestJA3WithFirefoxH2(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
 	}
 
-	t.Logf("JA3: %s", pr.TLS.JA3)
+	firefoxJA3 := "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-34-51-43-13-45-28-65037,29-23-24-25-256-257,0"
+
+	c, err := NewClientWithJA3(firefoxJA3, WithH2Profile("firefox"))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	// HTTP/2 should use Firefox settings
+	verifyH2(t, pr,
+		"1:65536;4:131072;5:16384|12517377|0|m,p,a,s",
+		"m,p,a,s",
+		true,
+	)
+
 	t.Logf("JA3 Hash: %s", pr.TLS.JA3Hash)
-	t.Logf("Akamai: %s", akamai)
+	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
 }
+
+// ---------------------------------------------------------------------------
+// Misc
+// ---------------------------------------------------------------------------
 
 func TestClientClose(t *testing.T) {
 	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac")
@@ -181,4 +378,47 @@ func TestClientClose(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 	c.Close()
+}
+
+func TestClientFromPool(t *testing.T) {
+	pool := []BrowserSpec{
+		{Browser: "chrome", Version: "145.0.0.0", Platform: "mac"},
+		{Browser: "chrome", Version: "145.0.0.0", Platform: "win"},
+	}
+	c, err := NewClientFromPool(pool)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	if c.Info.Browser != "chrome" {
+		t.Errorf("browser = %q, want chrome", c.Info.Browser)
+	}
+	if c.Info.Version != "145.0.0.0" {
+		t.Errorf("version = %q, want 145.0.0.0", c.Info.Version)
+	}
+}
+
+func TestCookieJarEnabled(t *testing.T) {
+	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	if c.Jar() == nil {
+		t.Error("cookie jar should be enabled by default")
+	}
+}
+
+func TestCookieJarDisabled(t *testing.T) {
+	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac", WithNoCookieJar())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	if c.Jar() != nil {
+		t.Error("cookie jar should be nil when disabled")
+	}
 }

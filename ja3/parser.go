@@ -125,6 +125,15 @@ func mapExtension(id uint16, s *Spec) tls.TLSExtension {
 		}
 	case 28: // record_size_limit
 		return &tls.FakeRecordSizeLimitExtension{Limit: 0x4001}
+	case 34: // delegated_credentials (used by Firefox)
+		return &tls.DelegatedCredentialsExtension{
+			SupportedSignatureAlgorithms: []tls.SignatureScheme{
+				tls.ECDSAWithP256AndSHA256,
+				tls.ECDSAWithP384AndSHA384,
+				tls.ECDSAWithP521AndSHA512,
+				tls.ECDSAWithSHA1,
+			},
+		}
 	case 35: // session_ticket
 		return &tls.SessionTicketExtension{}
 	case 43: // supported_versions
