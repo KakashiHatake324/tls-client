@@ -7,7 +7,7 @@ Built on [uTLS](https://github.com/refraction-networking/utls) for low-level Cli
 ## Install
 
 ```bash
-go get github.com/mpro4/tls-client
+go get github.com/KakashiHatake324/tls-client
 ```
 
 Requires Go 1.21+.
@@ -24,7 +24,7 @@ import (
     "io"
     "log"
 
-    tlsclient "github.com/mpro4/tls-client"
+    tlsclient "github.com/KakashiHatake324/tls-client"
 )
 
 func main() {
@@ -163,7 +163,7 @@ You can capture JA3 strings from [tls.peet.ws](https://tls.peet.ws/api/all) or [
 The `ja3` sub-package can be used independently:
 
 ```go
-import "github.com/mpro4/tls-client/ja3"
+import "github.com/KakashiHatake324/tls-client/ja3"
 
 spec, err := ja3.Parse("771,4865-4866-4867,...,29-23-24,0")
 if err != nil {

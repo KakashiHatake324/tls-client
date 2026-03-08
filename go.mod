@@ -1,4 +1,4 @@
-module github.com/mpro4/tls-client
+module github.com/KakashiHatake324/tls-client
 
 go 1.24.2
 

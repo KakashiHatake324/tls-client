@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mpro4/tls-client/ja3"
+	"github.com/KakashiHatake324/tls-client/ja3"
 	utls "github.com/refraction-networking/utls"
 	http "github.com/saucesteals/fhttp"
 )
