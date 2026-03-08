@@ -9,6 +9,7 @@ import (
 	"github.com/KakashiHatake324/tls-client/ja3"
 	utls "github.com/refraction-networking/utls"
 	http "github.com/saucesteals/fhttp"
+	"github.com/saucesteals/fhttp/cookiejar"
 )
 
 // Option configures a Client.
@@ -39,6 +40,23 @@ func WithDialTimeout(d time.Duration) Option {
 // This controls SETTINGS, WINDOW_UPDATE, pseudo-header order, and priority.
 func WithH2Profile(browser string) Option {
 	return func(c *Client) { c.h2Browser = browser }
+}
+
+// WithCookieJar sets a custom cookie jar. By default a new jar is created
+// automatically (like a real browser). Pass nil to disable cookie handling.
+func WithCookieJar(jar http.CookieJar) Option {
+	return func(c *Client) {
+		c.jar = jar
+		c.jarSet = true
+	}
+}
+
+// WithNoCookieJar disables automatic cookie handling.
+func WithNoCookieJar() Option {
+	return func(c *Client) {
+		c.jar = nil
+		c.jarSet = true
+	}
 }
 
 // ClientInfo holds the browser identity headers generated for the client.
@@ -72,6 +90,8 @@ type Client struct {
 	proxyURL    string
 	insecure    bool
 	h2Browser   string
+	jar         http.CookieJar
+	jarSet      bool // true if user explicitly set jar (even to nil)
 }
 
 // NewClientWithPreset creates a Client that mimics a specific browser version.
@@ -109,7 +129,7 @@ func NewClientWithPreset(browser, version, platform string, opts ...Option) (*Cl
 	}
 
 	c.transport = base
-	c.httpClient = &http.Client{Transport: transport, Timeout: c.timeout}
+	c.httpClient = &http.Client{Transport: transport, Timeout: c.timeout, Jar: c.resolveJar()}
 	c.Info = ClientInfo{
 		UserAgent:       headers.Get("user-agent"),
 		SecChUA:         headers.Get("sec-ch-ua"),
@@ -158,7 +178,7 @@ func NewClientWithJA3(ja3String string, opts ...Option) (*Client, error) {
 	}
 
 	c.transport = base
-	c.httpClient = &http.Client{Transport: transport, Timeout: c.timeout}
+	c.httpClient = &http.Client{Transport: transport, Timeout: c.timeout, Jar: c.resolveJar()}
 	return c, nil
 }
 
@@ -187,6 +207,19 @@ func (c *Client) HTTPClient() *http.Client {
 func (c *Client) applyDefaults() {
 	c.timeout = 30 * time.Second
 	c.dialTimeout = 10 * time.Second
+}
+
+func (c *Client) resolveJar() http.CookieJar {
+	if c.jarSet {
+		return c.jar
+	}
+	jar, _ := cookiejar.New(nil)
+	return jar
+}
+
+// Jar returns the cookie jar used by this client. Returns nil if cookies are disabled.
+func (c *Client) Jar() http.CookieJar {
+	return c.httpClient.Jar
 }
 
 func lookupProfile(browser, version string) (*browserProfile, error) {
