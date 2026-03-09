@@ -104,12 +104,12 @@ type Client struct {
 	transport  *http.Transport
 	Info       ClientInfo
 
-	timeout     time.Duration
-	dialTimeout time.Duration
-	proxyURL    string
-	insecure    bool
-	h2Browser   string
-	osVersion   string
+	timeout      time.Duration
+	dialTimeout  time.Duration
+	proxyURL     string
+	insecure     bool
+	h2Browser    string
+	osVersion    string
 	jar          http.CookieJar
 	jarSet       bool // true if user explicitly set jar (even to nil)
 	noRedirects  bool
@@ -131,6 +131,9 @@ type Client struct {
 func NewClientWithPreset(browser, version, platform string, opts ...Option) (*Client, error) {
 	c := &Client{}
 	c.applyDefaults()
+	if opts == nil {
+		opts = []Option{}
+	}
 	for _, o := range opts {
 		o(c)
 	}
