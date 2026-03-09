@@ -3,10 +3,12 @@ package tlsclient
 import (
 	"encoding/json"
 	"io"
+	"net/url"
 	"strings"
 	"testing"
 
 	http "github.com/saucesteals/fhttp"
+	"github.com/saucesteals/fhttp/cookiejar"
 )
 
 type peetResponse struct {
@@ -420,5 +422,78 @@ func TestCookieJarDisabled(t *testing.T) {
 
 	if c.Jar() != nil {
 		t.Error("cookie jar should be nil when disabled")
+	}
+}
+
+func TestCookieJarSetAndGet(t *testing.T) {
+	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	jar := c.Jar()
+	if jar == nil {
+		t.Fatal("jar is nil")
+	}
+
+	u, _ := url.Parse("https://example.com")
+
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "session", Value: "abc123"},
+		{Name: "lang", Value: "en"},
+	})
+
+	cookies := jar.Cookies(u)
+	if len(cookies) != 2 {
+		t.Fatalf("expected 2 cookies, got %d", len(cookies))
+	}
+
+	found := map[string]string{}
+	for _, c := range cookies {
+		found[c.Name] = c.Value
+	}
+
+	if found["session"] != "abc123" {
+		t.Errorf("session cookie = %q, want abc123", found["session"])
+	}
+	if found["lang"] != "en" {
+		t.Errorf("lang cookie = %q, want en", found["lang"])
+	}
+}
+
+func TestCookieJarCustom(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("new jar: %v", err)
+	}
+
+	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac", WithCookieJar(jar))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	u, _ := url.Parse("https://example.com")
+
+	c.Jar().SetCookies(u, []*http.Cookie{
+		{Name: "token", Value: "xyz789"},
+		{Name: "session", Value: "abc123"},
+	})
+
+	cookies := c.Jar().Cookies(u)
+	if len(cookies) != 2 {
+		t.Fatalf("expected 2 cookies, got %d", len(cookies))
+	}
+
+	found := map[string]string{}
+	for _, ck := range cookies {
+		found[ck.Name] = ck.Value
+	}
+	if found["token"] != "xyz789" {
+		t.Errorf("token = %q, want xyz789", found["token"])
+	}
+	if found["session"] != "abc123" {
+		t.Errorf("session = %q, want abc123", found["session"])
 	}
 }
