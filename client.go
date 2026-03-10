@@ -131,11 +131,10 @@ type Client struct {
 func NewClientWithPreset(browser, version, platform string, opts ...Option) (*Client, error) {
 	c := &Client{}
 	c.applyDefaults()
-	if opts == nil {
-		opts = []Option{}
-	}
 	for _, o := range opts {
-		o(c)
+		if o != nil {
+			o(c)
+		}
 	}
 
 	if err := c.validate(); err != nil {
@@ -194,7 +193,9 @@ func NewClientWithJA3(ja3String string, opts ...Option) (*Client, error) {
 	c := &Client{}
 	c.applyDefaults()
 	for _, o := range opts {
-		o(c)
+		if o != nil {
+			o(c)
+		}
 	}
 
 	if err := c.validate(); err != nil {
