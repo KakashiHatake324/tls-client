@@ -1,6 +1,9 @@
 package tlsclient
 
 import (
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -54,6 +57,9 @@ func buildPresetTransport(profile *browserProfile, platform Platform, opts *Clie
 	if err != nil {
 		return nil, nil, err
 	}
+	if opts.forceTLS12 {
+		specFn = capSpecToTLS12(specFn)
+	}
 
 	base := buildBaseTransport(opts)
 	base.GetTlsClientHelloSpec = specFn
@@ -80,7 +86,7 @@ func buildPresetTransport(profile *browserProfile, platform Platform, opts *Clie
 // buildJA3Transport creates a transport for a JA3 string with the given HTTP/2 profile.
 func buildJA3Transport(ja3String string, h2 *h2Profile, opts *Client) (*browserTransport, *http.Transport, error) {
 	base := buildBaseTransport(opts)
-	base.GetTlsClientHelloSpec = func() *utls.ClientHelloSpec {
+	specFn := func() *utls.ClientHelloSpec {
 		spec, _ := utls.UTLSIdToSpec(utls.HelloCustom)
 		parsed, err := parseJA3ToSpec(ja3String)
 		if err != nil {
@@ -88,6 +94,10 @@ func buildJA3Transport(ja3String string, h2 *h2Profile, opts *Client) (*browserT
 		}
 		return parsed
 	}
+	if opts.forceTLS12 {
+		specFn = capSpecToTLS12(specFn)
+	}
+	base.GetTlsClientHelloSpec = specFn
 
 	t2, err := http2.ConfigureTransports(base)
 	if err != nil {
@@ -135,8 +145,12 @@ func buildBaseTransport(c *Client) *http.Transport {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	if c.insecure {
-		t.TLSClientConfig = &utls.Config{InsecureSkipVerify: true}
+	if c.insecure || len(c.pins) > 0 {
+		cfg := &utls.Config{InsecureSkipVerify: c.insecure}
+		if len(c.pins) > 0 {
+			cfg.VerifyPeerCertificate = buildPinVerifier(c.pins)
+		}
+		t.TLSClientConfig = cfg
 	}
 
 	if c.proxyURL != "" {
@@ -147,4 +161,63 @@ func buildBaseTransport(c *Client) *http.Transport {
 	}
 
 	return t
+}
+
+// capSpecToTLS12 wraps a spec function to force TLS 1.2 by removing TLS 1.3
+// from the SupportedVersions extension and stripping TLS 1.3-only cipher suites.
+// This works around utls#345 where RSA-PSS verification fails in TLS 1.3.
+func capSpecToTLS12(original func() *utls.ClientHelloSpec) func() *utls.ClientHelloSpec {
+	return func() *utls.ClientHelloSpec {
+		spec := original()
+		spec.TLSVersMax = utls.VersionTLS12
+
+		// Remove TLS 1.3 from SupportedVersions extension.
+		for _, ext := range spec.Extensions {
+			if sv, ok := ext.(*utls.SupportedVersionsExtension); ok {
+				filtered := sv.Versions[:0]
+				for _, v := range sv.Versions {
+					if v != utls.VersionTLS13 {
+						filtered = append(filtered, v)
+					}
+				}
+				sv.Versions = filtered
+				break
+			}
+		}
+
+		// Remove TLS 1.3-only cipher suites (0x13xx).
+		filtered := spec.CipherSuites[:0]
+		for _, cs := range spec.CipherSuites {
+			if cs>>8 != 0x13 {
+				filtered = append(filtered, cs)
+			}
+		}
+		spec.CipherSuites = filtered
+
+		return spec
+	}
+}
+
+// buildPinVerifier returns a VerifyPeerCertificate callback that checks whether
+// any certificate in the chain has a SPKI SHA-256 hash matching one of the pins.
+func buildPinVerifier(pins []string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	pinSet := make(map[string]struct{}, len(pins))
+	for _, p := range pins {
+		pinSet[p] = struct{}{}
+	}
+
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		for _, rawCert := range rawCerts {
+			cert, err := x509.ParseCertificate(rawCert)
+			if err != nil {
+				continue
+			}
+			hash := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+			encoded := base64.StdEncoding.EncodeToString(hash[:])
+			if _, ok := pinSet[encoded]; ok {
+				return nil
+			}
+		}
+		return fmt.Errorf("tlsclient: ssl pinning failed: none of the %d certificate(s) matched any pinned public key", len(rawCerts))
+	}
 }

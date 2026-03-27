@@ -1,6 +1,8 @@
 package tlsclient
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
 	"net/url"
@@ -78,6 +80,31 @@ func WithMaxRedirects(n int) Option {
 	return func(c *Client) { c.maxRedirects = n }
 }
 
+// WithForceTLS12 forces the TLS handshake to negotiate TLS 1.2 instead of 1.3.
+// This works around a known uTLS bug (refraction-networking/utls#345) where
+// RSA-PSS signature verification fails during TLS 1.3 handshakes with certain
+// servers, especially behind proxies. The TLS fingerprint will change slightly
+// but cipher suites and extensions are preserved.
+func WithForceTLS12() Option {
+	return func(c *Client) { c.forceTLS12 = true }
+}
+
+// WithPinnedCerts enables SSL pinning using base64-encoded SHA-256 hashes of
+// the certificate's Subject Public Key Info (SPKI). If any certificate in the
+// peer's chain matches at least one pin, the connection is allowed; otherwise
+// the handshake fails. This is the same format used by HPKP and Android
+// network security config.
+//
+// Generate a pin from a PEM certificate:
+//
+//	openssl x509 -in cert.pem -pubkey -noout |
+//	  openssl pkey -pubin -outform DER |
+//	  openssl dgst -sha256 -binary |
+//	  base64
+func WithPinnedCerts(pins ...string) Option {
+	return func(c *Client) { c.pins = append(c.pins, pins...) }
+}
+
 // ClientInfo holds the browser identity headers generated for the client.
 // Use these when setting headers on your requests to stay consistent with
 // the TLS/HTTP/2 fingerprint.
@@ -108,6 +135,8 @@ type Client struct {
 	dialTimeout  time.Duration
 	proxyURL     string
 	insecure     bool
+	forceTLS12   bool
+	pins         []string // base64-encoded SHA-256 SPKI hashes for SSL pinning
 	h2Browser    string
 	osVersion    string
 	jar          http.CookieJar
@@ -263,6 +292,15 @@ func (c *Client) validate() error {
 		case "http", "https", "socks5", "socks5h":
 		default:
 			return fmt.Errorf("unsupported proxy scheme %q (use: http, https, socks5)", u.Scheme)
+		}
+	}
+	for i, pin := range c.pins {
+		raw, err := base64.StdEncoding.DecodeString(pin)
+		if err != nil {
+			return fmt.Errorf("invalid pin[%d]: not valid base64: %w", i, err)
+		}
+		if len(raw) != sha256.Size {
+			return fmt.Errorf("invalid pin[%d]: expected %d bytes (SHA-256), got %d", i, sha256.Size, len(raw))
 		}
 	}
 	return nil
