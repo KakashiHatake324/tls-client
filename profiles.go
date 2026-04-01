@@ -529,7 +529,7 @@ func iosTLSSpec() *utls.ClientHelloSpec {
 				utls.VersionTLS12,
 			}},
 			&utls.UtlsCompressCertExtension{
-				Algorithms: []utls.CertCompressionAlgo{utls.CertCompressionZlib},
+				Algorithms: []utls.CertCompressionAlgo{utls.CertCompressionBrotli},
 			},
 			&utls.UtlsGREASEExtension{},
 		},
@@ -803,7 +803,7 @@ func safariMacTLSSpec() *utls.ClientHelloSpec {
 				utls.VersionTLS12,
 			}},
 			&utls.UtlsCompressCertExtension{Algorithms: []utls.CertCompressionAlgo{
-				utls.CertCompressionZlib,
+				utls.CertCompressionBrotli,
 			}},
 			&utls.UtlsGREASEExtension{},
 			&utls.UtlsPaddingExtension{GetPaddingLen: utls.BoringPaddingStyle},
