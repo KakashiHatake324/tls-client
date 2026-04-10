@@ -89,6 +89,13 @@ func WithForceTLS12() Option {
 	return func(c *Client) { c.forceTLS12 = true }
 }
 
+// WithBypassCache randomizes the capitalization of the request hostname on each
+// request. Since DNS is case-insensitive, the request still resolves normally,
+// but caches keyed on the exact Host/:authority value see a unique key each time.
+func WithBypassCache() Option {
+	return func(c *Client) { c.bypassCache = true }
+}
+
 // WithPinnedCerts enables SSL pinning using base64-encoded SHA-256 hashes of
 // the certificate's Subject Public Key Info (SPKI). If any certificate in the
 // peer's chain matches at least one pin, the connection is allowed; otherwise
@@ -137,6 +144,7 @@ type Client struct {
 	insecure     bool
 	forceTLS12   bool
 	pins         []string // base64-encoded SHA-256 SPKI hashes for SSL pinning
+	bypassCache  bool
 	h2Browser    string
 	osVersion    string
 	jar          http.CookieJar
@@ -270,6 +278,13 @@ func (c *Client) Close() {
 	if c.transport != nil {
 		c.transport.CloseIdleConnections()
 	}
+}
+
+// GetDefaultUserAgent returns the User-Agent string generated for this client's
+// browser profile. Returns an empty string for JA3-only clients that have no
+// associated browser identity.
+func (c *Client) GetDefaultUserAgent() string {
+	return c.Info.UserAgent
 }
 
 // HTTPClient returns the underlying fhttp client for advanced use.

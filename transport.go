@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/url"
+	"strings"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -21,9 +22,20 @@ type browserTransport struct {
 	base              http.RoundTripper
 	pseudoHeaderOrder []string
 	defaultHeaders    http.Header
+	bypassCache       bool
 }
 
 func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.bypassCache {
+		randomized := randomizeCase(req.URL.Hostname())
+		if port := req.URL.Port(); port != "" {
+			req.URL.Host = randomized + ":" + port
+		} else {
+			req.URL.Host = randomized
+		}
+		req.Host = req.URL.Host
+	}
+
 	h := req.Header
 
 	h[http.PHeaderOrderKey] = t.pseudoHeaderOrder
@@ -80,6 +92,7 @@ func buildPresetTransport(profile *browserProfile, platform Platform, opts *Clie
 		base:              base,
 		pseudoHeaderOrder: profile.h2.PseudoHeaderOrder,
 		defaultHeaders:    headers,
+		bypassCache:       opts.bypassCache,
 	}, base, nil
 }
 
@@ -109,6 +122,7 @@ func buildJA3Transport(ja3String string, h2 *h2Profile, opts *Client) (*browserT
 	return &browserTransport{
 		base:              base,
 		pseudoHeaderOrder: h2.PseudoHeaderOrder,
+		bypassCache:       opts.bypassCache,
 	}, base, nil
 }
 
@@ -220,4 +234,23 @@ func buildPinVerifier(pins []string) func(rawCerts [][]byte, verifiedChains [][]
 		}
 		return fmt.Errorf("tlsclient: ssl pinning failed: none of the %d certificate(s) matched any pinned public key", len(rawCerts))
 	}
+}
+
+// randomizeCase returns s with each letter randomly upper- or lower-cased.
+func randomizeCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			if rand.IntN(2) == 0 {
+				r -= 'a' - 'A'
+			}
+		} else if r >= 'A' && r <= 'Z' {
+			if rand.IntN(2) == 0 {
+				r += 'a' - 'A'
+			}
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
