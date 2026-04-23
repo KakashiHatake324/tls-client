@@ -60,7 +60,41 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		h[http.HeaderOrderKey] = keys
 	}
 
+	// HTTP/2 wire format uses lowercase header names, and fhttp's HTTP/2
+	// write path does case-sensitive map lookups for a handful of headers —
+	// most notably "accept-encoding" (http2/transport.go:1636). When our
+	// value is stored under the canonical "Accept-Encoding" key fhttp's
+	// check misses it and appends its own "accept-encoding: gzip, deflate,
+	// br" alongside ours, producing two Accept-Encoding headers on the
+	// wire. Force every real header key to lowercase so the map ends up in
+	// the shape fhttp expects. Sentinel keys (header order, pseudo-header
+	// order) are left alone.
+	lowercaseHeaderKeys(h)
+
 	return t.base.RoundTrip(req)
+}
+
+// lowercaseHeaderKeys moves every entry in h to a lowercase key, preserving
+// values. The header-order and pseudo-header-order sentinel keys are
+// skipped. If the same lowercased key appears more than once (e.g. both
+// "Accept-Encoding" and "accept-encoding" were set explicitly), values are
+// concatenated.
+func lowercaseHeaderKeys(h http.Header) {
+	for key, values := range h {
+		if key == http.HeaderOrderKey || key == http.PHeaderOrderKey {
+			continue
+		}
+		lower := strings.ToLower(key)
+		if lower == key {
+			continue
+		}
+		if existing, ok := h[lower]; ok {
+			h[lower] = append(existing, values...)
+		} else {
+			h[lower] = values
+		}
+		delete(h, key)
+	}
 }
 
 // buildPresetTransport creates a fully configured transport for a browser profile.
