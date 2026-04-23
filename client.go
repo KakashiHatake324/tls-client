@@ -263,14 +263,11 @@ func NewClientWithJA3(ja3String string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-// Do executes an HTTP request using the fingerprinted client.
+// Do executes an HTTP request using the fingerprinted client. It returns the
+// raw *http.Response; for a higher-level API with auto-decompression and
+// helpers, use the Get/Post/Request methods in requests.go.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	return c.httpClient.Do(req)
-}
-
-// Get performs a GET request.
-func (c *Client) Get(url string) (*http.Response, error) {
-	return c.httpClient.Get(url)
 }
 
 // Close releases idle connections. Always call when done with the client.

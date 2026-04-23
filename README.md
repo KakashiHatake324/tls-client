@@ -77,6 +77,137 @@ client, err := tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac",
 )
 ```
 
+## Requests
+
+The client ships with verb helpers that handle body encoding, header ordering, and response decompression (gzip / br / deflate) automatically. Use them anywhere in any repo as a drop-in HTTP layer.
+
+```go
+client, _ := tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac")
+
+resp, err := client.Get("https://api.example.com/v1/users")
+if err != nil {
+    log.Fatal(err)
+}
+
+resp.StatusCode  // int
+resp.String()    // decoded body as string
+resp.Body        // decoded body as []byte
+resp.Headers     // fhttp.Header
+resp.Cookies     // []*fhttp.Cookie
+resp.OK()        // true if 2xx
+```
+
+### Verbs
+
+| Method | Signature |
+|--------|-----------|
+| `client.Get(url, opts...)` | GET request |
+| `client.Post(url, body, opts...)` | POST request |
+| `client.Put(url, body, opts...)` | PUT request |
+| `client.Patch(url, body, opts...)` | PATCH request |
+| `client.Delete(url, opts...)` | DELETE request |
+| `client.Head(url, opts...)` | HEAD request |
+| `client.Options(url, opts...)` | OPTIONS request |
+| `client.Request(method, url, body, opts...)` | Generic request |
+
+The `body` argument accepts `nil`, `[]byte`, `string`, or `io.Reader`. For JSON and form bodies use `WithJSON` or `WithForm` — they set the right `Content-Type` for you.
+
+### Headers
+
+Headers are set with request options. Mix and match as needed — all of these work together.
+
+```go
+// Single header
+client.Get(url, tlsclient.WithHeader("Authorization", "Bearer "+token))
+
+// Multiple headers from a map
+client.Get(url, tlsclient.WithHeaders(map[string]string{
+    "Authorization": "Bearer " + token,
+    "Accept":        "application/json",
+    "X-Client":      "my-app",
+}))
+
+// Ordered headers — written to the wire in this order
+client.Get(url,
+    tlsclient.WithHeaders(map[string]string{
+        "User-Agent": client.Info.UserAgent,
+        "Accept":     "application/json",
+        "Referer":    "https://example.com",
+    }),
+    tlsclient.WithHeaderOrder("User-Agent", "Accept", "Referer"),
+)
+
+// From an existing fhttp.Header (a "Header-Order" key inside the map is
+// interpreted as the order directive — useful for porting existing code
+// that used map[string][]string with a magic "header-order" key)
+h := http.Header{
+    "User-Agent":   {client.Info.UserAgent},
+    "Accept":       {"application/json"},
+    "header-order": {"User-Agent", "Accept"},
+}
+client.Get(url, tlsclient.WithHeaderMap(h))
+
+// Override the Host / :authority header
+client.Get(url, tlsclient.WithRequestHost("internal.example.com"))
+```
+
+### Bodies
+
+```go
+// JSON body — sets Content-Type: application/json
+payload := map[string]any{"name": "Ada", "age": 36}
+resp, err := client.Post(url, nil, tlsclient.WithJSON(payload))
+
+// Form body — sets Content-Type: application/x-www-form-urlencoded
+form := url.Values{"username": {"ada"}, "password": {"secret"}}
+resp, err := client.Post(url, nil, tlsclient.WithForm(form))
+
+// Raw body as a byte slice, string, or io.Reader
+resp, err := client.Post(url, []byte(`{"raw":"json"}`))
+resp, err := client.Post(url, "plain text")
+resp, err := client.Post(url, bytes.NewReader(data))
+
+// Or via option (lets you keep the body param nil for readability)
+resp, err := client.Post(url, nil, tlsclient.WithRawBody(bytes.NewReader(data)))
+```
+
+### Query Parameters, Context, and Status Validation
+
+```go
+resp, err := client.Get(url,
+    tlsclient.WithContext(ctx),
+    tlsclient.WithQuery(url.Values{"q": {"hello"}, "page": {"2"}}),
+    tlsclient.WithAcceptedStatus(200, 201), // returns error if status isn't one of these
+)
+```
+
+### Decoding Responses
+
+```go
+// As a string
+text := resp.String()
+
+// As JSON into a struct
+var out struct {
+    ID   string `json:"id"`
+    Name string `json:"name"`
+}
+if err := resp.JSON(&out); err != nil { ... }
+
+// Raw bytes
+fmt.Printf("%d bytes\n", len(resp.Body))
+```
+
+### Raw Access
+
+For advanced use cases (custom request construction, streaming bodies, TLS connection state), drop down to `Do`:
+
+```go
+req, _ := http.NewRequest("GET", url, nil)
+req.Header.Set("User-Agent", client.Info.UserAgent)
+resp, err := client.Do(req) // returns *fhttp.Response — you own Body.Close()
+```
+
 ## Browser + Platform Support
 
 | Browser | win | mac | linux | android | ios | ipados |
@@ -128,13 +259,14 @@ tlsclient.NewClientWithPreset("okhttp", "4.12.0", "android")
 | Field/Method | Description |
 |--------------|-------------|
 | `Info` | `ClientInfo` struct with UserAgent, SecChUA, SecChUAMobile, SecChUAPlatform, Browser, Version, Platform |
-| `Do(req)` | Execute an `*fhttp.Request` |
-| `Get(url)` | Shorthand GET |
+| `Get/Post/Put/Patch/Delete/Head/Options(url, opts...)` | Verb helpers — return `*Response` with decoded body |
+| `Request(method, url, body, opts...)` | Generic request — returns `*Response` |
+| `Do(req)` | Execute a raw `*fhttp.Request`, returns `*fhttp.Response` |
 | `Close()` | Release idle connections |
 | `Jar()` | Access the cookie jar |
 | `HTTPClient()` | Access the underlying `*fhttp.Client` |
 
-### Options
+### Client Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -145,6 +277,44 @@ tlsclient.NewClientWithPreset("okhttp", "4.12.0", "android")
 | `WithH2Profile(browser)` | `"chrome"` | HTTP/2 profile for JA3 mode (`"chrome"`, `"firefox"`, `"safari"`) |
 | `WithCookieJar(jar)` | auto | Custom cookie jar |
 | `WithNoCookieJar()` | | Disable cookies |
+| `WithNoRedirects()` | follow | Don't follow redirects |
+| `WithMaxRedirects(n)` | 10 | Cap redirect chain length |
+| `WithForceTLS12()` | false | Pin TLS 1.2 handshake |
+| `WithBypassCache()` | false | Randomize host casing per request |
+| `WithPinnedCerts(pins...)` | none | SPKI SHA-256 SSL pins |
+
+### Request Options
+
+Passed to `Get`, `Post`, `Request`, etc. Scope is a single request.
+
+| Option | Description |
+|--------|-------------|
+| `WithContext(ctx)` | Attach a `context.Context` |
+| `WithHeader(key, value)` | Set a single header |
+| `WithHeaders(map[string]string)` | Set multiple headers |
+| `WithHeaderMap(fhttp.Header)` | Set headers from an `fhttp.Header` — `"Header-Order"` key is treated as order directive |
+| `WithHeaderOrder(keys...)` | Order headers on the wire |
+| `WithQuery(url.Values)` | Append query parameters |
+| `WithRequestHost(host)` | Override Host / :authority |
+| `WithJSON(v)` | JSON body, sets `Content-Type: application/json` |
+| `WithForm(url.Values)` | Form body, sets `Content-Type: application/x-www-form-urlencoded` |
+| `WithRawBody(r)` | Body from an `io.Reader` |
+| `WithAcceptedStatus(codes...)` | Error if response status isn't in the list |
+
+### Response
+
+| Field/Method | Description |
+|--------------|-------------|
+| `StatusCode` | HTTP status code |
+| `Status` | Status text (e.g. `"200 OK"`) |
+| `Body` | Decoded response body as `[]byte` |
+| `Headers` | `fhttp.Header` |
+| `Cookies` | `[]*fhttp.Cookie` |
+| `Request` | The request that produced this response |
+| `Raw` | Underlying `*fhttp.Response` (body already drained) |
+| `String()` | Body as a string |
+| `JSON(&v)` | Decode body into `v` |
+| `OK()` | True if status is 2xx |
 
 ## Cookie Jar
 
