@@ -96,6 +96,35 @@ func WithBypassCache() Option {
 	return func(c *Client) { c.bypassCache = true }
 }
 
+// WithTrustAnchors adds the TLS trust_anchors extension (0xca34, from
+// draft-ietf-tls-trust-anchor-ids) to the ClientHello. Chromium presets only.
+//
+// Chrome 141+ can send this extension, but it is gated behind the
+// TLSTrustAnchorIDs Finch experiment and is currently off for most stable
+// desktop builds, so it is opt-in here. Enabling it moves the JA4 prefix from
+// t13d1516h2 (16 extensions) to t13d1517h2 (17), matching Chrome builds that
+// have the experiment active.
+//
+// Call with no arguments to send an empty list, which is what Chrome sends on
+// an initial connection with no server-advertised IDs to intersect against.
+// IDs are given in ASCII dotted-decimal relative OID form, e.g. "32473.1".
+func WithTrustAnchors(ids ...string) Option {
+	return func(c *Client) {
+		c.experiments.trustAnchors = append([]string(nil), ids...)
+		c.experiments.trustAnchorsSet = true
+	}
+}
+
+// WithMLDSA advertises the post-quantum ML-DSA signature schemes mldsa44
+// (0x0904), mldsa65 (0x0905), and mldsa87 (0x0906) ahead of the classical
+// algorithms in signature_algorithms. Chromium presets only.
+//
+// Chrome 151 sends these in Dev builds behind an experiment; stable does not
+// send them by default, so this is opt-in. Enabling it changes the JA4_c hash.
+func WithMLDSA() Option {
+	return func(c *Client) { c.experiments.mldsa = true }
+}
+
 // WithPinnedCerts enables SSL pinning using base64-encoded SHA-256 hashes of
 // the certificate's Subject Public Key Info (SPKI). If any certificate in the
 // peer's chain matches at least one pin, the connection is allowed; otherwise
@@ -147,6 +176,7 @@ type Client struct {
 	bypassCache  bool
 	h2Browser    string
 	osVersion    string
+	experiments  chromeExperiments
 	jar          http.CookieJar
 	jarSet       bool // true if user explicitly set jar (even to nil)
 	noRedirects  bool
@@ -178,7 +208,7 @@ func NewClientWithPreset(browser, version, platform string, opts ...Option) (*Cl
 		return nil, fmt.Errorf("tlsclient: %w", err)
 	}
 
-	profile, err := lookupProfile(browser, version, c.osVersion, Platform(platform))
+	profile, err := lookupProfile(browser, version, c.osVersion, Platform(platform), c.experiments)
 	if err != nil {
 		return nil, fmt.Errorf("tlsclient: %w", err)
 	}
@@ -315,6 +345,11 @@ func (c *Client) validate() error {
 			return fmt.Errorf("invalid pin[%d]: expected %d bytes (SHA-256), got %d", i, sha256.Size, len(raw))
 		}
 	}
+	// Surface malformed trust anchor IDs at construction time rather than
+	// silently emitting a broken ClientHello on the first request.
+	if _, err := c.experiments.trustAnchorsExtension(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -349,14 +384,14 @@ func (c *Client) Jar() http.CookieJar {
 	return c.httpClient.Jar
 }
 
-func lookupProfile(browser, version, osVersion string, platform Platform) (*browserProfile, error) {
+func lookupProfile(browser, version, osVersion string, platform Platform, exp chromeExperiments) (*browserProfile, error) {
 	switch strings.ToLower(strings.TrimSpace(browser)) {
 	case "chrome":
-		return chromiumProfile("Google Chrome", version, osVersion, platform)
+		return chromiumProfile("Google Chrome", version, osVersion, platform, exp)
 	case "edge":
-		return chromiumProfile("Microsoft Edge", version, osVersion, platform)
+		return chromiumProfile("Microsoft Edge", version, osVersion, platform, exp)
 	case "brave":
-		return chromiumProfile("Brave", version, osVersion, platform)
+		return chromiumProfile("Brave", version, osVersion, platform, exp)
 	case "firefox":
 		return firefoxProfile(version)
 	case "safari":
@@ -371,7 +406,7 @@ func lookupProfile(browser, version, osVersion string, platform Platform) (*brow
 func lookupH2Profile(browser string) (*h2Profile, error) {
 	switch strings.ToLower(strings.TrimSpace(browser)) {
 	case "", "chrome", "edge", "brave":
-		return chromiumH2Profile(145), nil
+		return chromiumH2Profile(currentChromeMajor), nil
 	case "firefox":
 		return firefoxH2Profile(), nil
 	case "safari":

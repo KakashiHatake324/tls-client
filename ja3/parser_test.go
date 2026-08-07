@@ -46,8 +46,10 @@ func TestClientHelloSpec(t *testing.T) {
 	}
 
 	hello := spec.ClientHelloSpec()
-	if hello.TLSVersMax != tls.VersionTLS12 {
-		t.Errorf("TLSVersMax = 0x%04x, want 0x%04x (TLS 1.2 / JA3 version 771)", hello.TLSVersMax, tls.VersionTLS12)
+	// The JA3 version field is 771, but the cipher list contains TLS 1.3 suites
+	// (4865-4867), so the spec must offer TLS 1.3. See Spec.MaxVersion.
+	if hello.TLSVersMax != tls.VersionTLS13 {
+		t.Errorf("TLSVersMax = 0x%04x, want 0x%04x (TLS 1.3, inferred from 0x13xx ciphers)", hello.TLSVersMax, tls.VersionTLS13)
 	}
 	if len(hello.CipherSuites) != 15 {
 		t.Errorf("CipherSuites count = %d, want 15", len(hello.CipherSuites))
@@ -108,5 +110,63 @@ func TestIsGREASE(t *testing.T) {
 	}
 	if isGREASE(0x0001) {
 		t.Error("isGREASE(0x0001) = true, want false")
+	}
+}
+
+// TestMaxVersion covers the JA3 legacy-version trap: the first JA3 field is the
+// ClientHello legacy_version, which RFC 8446 pins to 771 for TLS 1.3 clients,
+// so TLS 1.3 support has to be inferred from the presence of a 0x13xx suite.
+func TestMaxVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		ja3  string
+		want uint16
+	}{
+		{
+			name: "tls 1.3 client advertising legacy 771",
+			ja3:  "771,4865-4866-4867-49195-156-47,0-43-51-13,29-23-24,0",
+			want: tls.VersionTLS13,
+		},
+		{
+			name: "genuine tls 1.2 only client",
+			ja3:  "771,49195-49199-156-157-47-53,0-10-11-13-23,29-23-24,0",
+			want: tls.VersionTLS12,
+		},
+		{
+			name: "tls 1.1 client",
+			ja3:  "770,49171-49172-47-53,0-10-11,29-23-24,0",
+			want: tls.VersionTLS11,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := Parse(tc.ja3)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := spec.MaxVersion(); got != tc.want {
+				t.Errorf("MaxVersion() = 0x%04x, want 0x%04x", got, tc.want)
+			}
+			if got := spec.ClientHelloSpec().TLSVersMax; got != tc.want {
+				t.Errorf("TLSVersMax = 0x%04x, want 0x%04x", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSupportedVersionsTLS13Shape checks that a TLS 1.3 client advertises only
+// 1.3 and 1.2, as real browsers do. Adding 1.1/1.0 would change the peetprint,
+// whose first field is this list.
+func TestSupportedVersionsTLS13Shape(t *testing.T) {
+	ext := supportedVersionsExt(tls.VersionTLS13)
+	want := []uint16{tls.VersionTLS13, tls.VersionTLS12}
+	if len(ext.Versions) != len(want) {
+		t.Fatalf("versions = %v, want %v", ext.Versions, want)
+	}
+	for i, v := range want {
+		if ext.Versions[i] != v {
+			t.Errorf("versions[%d] = 0x%04x, want 0x%04x", i, ext.Versions[i], v)
+		}
 	}
 }

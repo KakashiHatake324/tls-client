@@ -20,6 +20,7 @@ type peetResponse struct {
 		JA3                  string   `json:"ja3"`
 		JA3Hash              string   `json:"ja3_hash"`
 		JA4                  string   `json:"ja4"`
+		JA4R                 string   `json:"ja4_r"`
 		PeetprintHash        string   `json:"peetprint_hash"`
 	} `json:"tls"`
 	HTTP2 struct {
@@ -32,9 +33,9 @@ type peetResponse struct {
 			Headers   []string `json:"headers,omitempty"`
 			Flags     []string `json:"flags,omitempty"`
 			Priority  *struct {
-				Weight    int  `json:"weight"`
-				DependsOn int  `json:"depends_on"`
-				Exclusive int  `json:"exclusive"`
+				Weight    int `json:"weight"`
+				DependsOn int `json:"depends_on"`
+				Exclusive int `json:"exclusive"`
 			} `json:"priority,omitempty"`
 		} `json:"sent_frames"`
 	} `json:"http2"`
@@ -116,15 +117,15 @@ func pseudoOrder(headers []string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Chrome 145 desktop
+// Chrome 151 desktop
 // ---------------------------------------------------------------------------
 
-func TestPresetChrome145Mac(t *testing.T) {
+func TestPresetChrome151Mac(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
 
-	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac")
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestPresetChrome145Mac(t *testing.T) {
 
 	pr := fetchPeet(t, c)
 
-	// TLS: must match real Chrome 145 peetprint and JA4
+	// TLS: must match real Chrome 151 peetprint and JA4
 	if pr.TLS.PeetprintHash != "1d4ffe9b0e34acac0bd883fa7f79d7b5" {
 		t.Errorf("peetprint_hash = %q, want 1d4ffe9b0e34acac0bd883fa7f79d7b5", pr.TLS.PeetprintHash)
 	}
@@ -170,7 +171,7 @@ func TestPresetChromeMobileAndroid(t *testing.T) {
 		t.Skip("skipping integration test")
 	}
 
-	c, err := NewClientWithPreset("chrome", "145.0.0.0", "android")
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "android")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -306,17 +307,128 @@ func TestPresetSafariIOS(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// JA3 with Chrome H2
+// Chrome experiment options (trust_anchors, ML-DSA)
 // ---------------------------------------------------------------------------
 
-func TestJA3Chrome145(t *testing.T) {
+// TestChromeTrustAnchorsLive confirms the trust_anchors extension is accepted
+// by a real server and lands in the ClientHello as extension ca34, moving the
+// JA4 prefix from t13d1516h2 to t13d1517h2 like Chrome 141+ with the
+// TLSTrustAnchorIDs trial active.
+func TestChromeTrustAnchorsLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
 
-	chrome145JA3 := "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-43-35-65037-17613-27-11-16-13-18-5-51-23-10-45-65281,4588-29-23-24,0"
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithTrustAnchors())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
 
-	c, err := NewClientWithJA3(chrome145JA3)
+	pr := fetchPeet(t, c)
+
+	if !strings.HasPrefix(pr.TLS.JA4, "t13d1517h2") {
+		t.Errorf("ja4 = %q, want t13d1517h2 prefix (17 extensions)", pr.TLS.JA4)
+	}
+	if !strings.Contains(pr.TLS.JA4R, "ca34") {
+		t.Errorf("ja4_r missing ca34 extension: %s", pr.TLS.JA4R)
+	}
+
+	// HTTP/2 is unaffected by the TLS extension.
+	verifyH2(t, pr,
+		"1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+		"m,a,s,p",
+		true,
+	)
+
+	t.Logf("JA4:   %s", pr.TLS.JA4)
+	t.Logf("JA4_r: %s", pr.TLS.JA4R)
+}
+
+// TestChromeTrustAnchorsWithIDsLive sends a non-empty trust anchor list.
+func TestChromeTrustAnchorsWithIDsLive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac",
+		WithTrustAnchors("32473.1", "32473.2.1"))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	if !strings.Contains(pr.TLS.JA4R, "ca34") {
+		t.Errorf("ja4_r missing ca34 extension: %s", pr.TLS.JA4R)
+	}
+	t.Logf("JA4: %s", pr.TLS.JA4)
+}
+
+// TestChromeMLDSALive confirms the ML-DSA signature schemes appear ahead of the
+// classical algorithms, matching Chrome 151 Dev captures.
+func TestChromeMLDSALive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithMLDSA())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	// JA4_r lists signature algorithms in wire order after the final underscore.
+	if !strings.Contains(pr.TLS.JA4R, "0904,0905,0906") {
+		t.Errorf("ja4_r missing ML-DSA schemes in order: %s", pr.TLS.JA4R)
+	}
+	t.Logf("JA4:   %s", pr.TLS.JA4)
+	t.Logf("JA4_r: %s", pr.TLS.JA4R)
+}
+
+// TestChromeBothExperimentsLive matches the full Chrome 151 Dev shape.
+func TestChromeBothExperimentsLive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithTrustAnchors(), WithMLDSA())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	if !strings.HasPrefix(pr.TLS.JA4, "t13d1517h2") {
+		t.Errorf("ja4 = %q, want t13d1517h2 prefix", pr.TLS.JA4)
+	}
+	if !strings.Contains(pr.TLS.JA4R, "ca34") {
+		t.Errorf("ja4_r missing ca34: %s", pr.TLS.JA4R)
+	}
+	if !strings.Contains(pr.TLS.JA4R, "0904,0905,0906") {
+		t.Errorf("ja4_r missing ML-DSA schemes: %s", pr.TLS.JA4R)
+	}
+
+	t.Logf("JA4:   %s", pr.TLS.JA4)
+	t.Logf("JA4_r: %s", pr.TLS.JA4R)
+}
+
+// ---------------------------------------------------------------------------
+// JA3 with Chrome H2
+// ---------------------------------------------------------------------------
+
+func TestJA3Chrome151(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	chrome151JA3 := "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-43-35-65037-17613-27-11-16-13-18-5-51-23-10-45-65281,4588-29-23-24,0"
+
+	c, err := NewClientWithJA3(chrome151JA3)
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -325,8 +437,8 @@ func TestJA3Chrome145(t *testing.T) {
 	pr := fetchPeet(t, c)
 
 	// Exact JA3 match (no extension shuffling in JA3 mode)
-	if pr.TLS.JA3 != chrome145JA3 {
-		t.Errorf("JA3 mismatch:\n  got:  %s\n  want: %s", pr.TLS.JA3, chrome145JA3)
+	if pr.TLS.JA3 != chrome151JA3 {
+		t.Errorf("JA3 mismatch:\n  got:  %s\n  want: %s", pr.TLS.JA3, chrome151JA3)
 	}
 
 	// HTTP/2 should use Chrome settings
@@ -375,7 +487,7 @@ func TestJA3WithFirefoxH2(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClientClose(t *testing.T) {
-	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac")
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -384,8 +496,8 @@ func TestClientClose(t *testing.T) {
 
 func TestClientFromPool(t *testing.T) {
 	pool := []BrowserSpec{
-		{Browser: "chrome", Version: "145.0.0.0", Platform: "mac"},
-		{Browser: "chrome", Version: "145.0.0.0", Platform: "win"},
+		{Browser: "chrome", Version: "151.0.0.0", Platform: "mac"},
+		{Browser: "chrome", Version: "151.0.0.0", Platform: "win"},
 	}
 	c, err := NewClientFromPool(pool)
 	if err != nil {
@@ -396,13 +508,13 @@ func TestClientFromPool(t *testing.T) {
 	if c.Info.Browser != "chrome" {
 		t.Errorf("browser = %q, want chrome", c.Info.Browser)
 	}
-	if c.Info.Version != "145.0.0.0" {
-		t.Errorf("version = %q, want 145.0.0.0", c.Info.Version)
+	if c.Info.Version != "151.0.0.0" {
+		t.Errorf("version = %q, want 151.0.0.0", c.Info.Version)
 	}
 }
 
 func TestCookieJarEnabled(t *testing.T) {
-	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac")
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -414,7 +526,7 @@ func TestCookieJarEnabled(t *testing.T) {
 }
 
 func TestCookieJarDisabled(t *testing.T) {
-	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac", WithNoCookieJar())
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithNoCookieJar())
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -426,7 +538,7 @@ func TestCookieJarDisabled(t *testing.T) {
 }
 
 func TestCookieJarSetAndGet(t *testing.T) {
-	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac")
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -468,7 +580,7 @@ func TestCookieJarCustom(t *testing.T) {
 		t.Fatalf("new jar: %v", err)
 	}
 
-	c, err := NewClientWithPreset("chrome", "145.0.0.0", "mac", WithCookieJar(jar))
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithCookieJar(jar))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

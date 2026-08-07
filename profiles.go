@@ -10,6 +10,12 @@ import (
 	http2 "github.com/saucesteals/fhttp/http2"
 )
 
+// currentChromeMajor is the latest Chrome stable major version this package has
+// been verified against. Used as the default when no explicit version is
+// available (e.g. JA3 mode). Every version from 120 up shares the same HTTP/2
+// profile, so bumping this is documentation rather than a behavior change.
+const currentChromeMajor = 151
+
 // Platform represents the OS the browser is running on.
 type Platform string
 
@@ -41,9 +47,9 @@ type browserProfile struct {
 }
 
 const (
-	settingEnableConnectProtocol = http2.SettingID(0x8)
-	settingNoRFC7540Priorities   = http2.SettingID(0x9)
-	fakeTLSECDHERSAWith3DES     uint16 = 0xc012
+	settingEnableConnectProtocol        = http2.SettingID(0x8)
+	settingNoRFC7540Priorities          = http2.SettingID(0x9)
+	fakeTLSECDHERSAWith3DES      uint16 = 0xc012
 )
 
 // =====================================================================
@@ -54,7 +60,7 @@ const (
 // Version-specific TLS is selected based on the real browser evolution.
 // On iOS/iPadOS, the TLS fingerprint uses Apple's WebKit stack and
 // the HTTP/2 profile uses iOS settings (not Chrome desktop).
-func chromiumProfile(brand, version, osVersion string, platform Platform) (*browserProfile, error) {
+func chromiumProfile(brand, version, osVersion string, platform Platform, exp chromeExperiments) (*browserProfile, error) {
 	majorStr, majorNum, err := parseMajor(version)
 	if err != nil {
 		return nil, err
@@ -84,10 +90,13 @@ func chromiumProfile(brand, version, osVersion string, platform Platform) (*brow
 		h2: h2,
 		specFn: func(p Platform) (func() *utls.ClientHelloSpec, error) {
 			if p == PlatformIOS || p == PlatformIPadOS {
-				return newIOSSpecFunc(), nil
+				return newIOSSpecFunc(currentAppleMajor), nil
 			}
 			if majorNum >= 132 {
-				return newChrome133SpecFunc(), nil
+				return newChrome133SpecFunc(exp)
+			}
+			if exp.any() {
+				return nil, fmt.Errorf("chromium %s: WithTrustAnchors/WithMLDSA require version 132 or newer", version)
 			}
 			id := chromiumTLSHelloID(majorNum, isAndroid)
 			return newSpecFunc(id), nil
@@ -106,6 +115,11 @@ func chromiumProfile(brand, version, osVersion string, platform Platform) (*brow
 //	131 desktop: Kyber replaced by MLKEM768 (4588), ALPS 17513
 //	131 Android: still 29-23-24 (no MLKEM768), ALPS 17513
 //	132+ all platforms: MLKEM768 (4588), new ALPS 17613, identical desktop/Android
+//	141+: trust_anchors (0xca34) available behind a Finch trial, off for most
+//	      stable builds; opt in with WithTrustAnchors
+//	151+: ML-DSA signature schemes in Dev behind a trial; opt in with WithMLDSA
+//
+// The core shape has been stable since 132, so 132 through 151+ share one spec.
 func chromiumTLSHelloID(v int, isAndroid bool) utls.ClientHelloID {
 	switch {
 	case v < 102:
@@ -274,15 +288,50 @@ func firefoxProfile(version string) (*browserProfile, error) {
 
 	return &browserProfile{
 		h2: firefoxH2Profile(),
-		specFn: func(_ Platform) (func() *utls.ClientHelloSpec, error) {
+		specFn: func(p Platform) (func() *utls.ClientHelloSpec, error) {
 			if majorNum >= 120 {
-				return newFirefox120SpecFunc(), nil
+				return newFirefox120SpecFunc(majorNum, p), nil
 			}
 			return newSpecFunc(helloID), nil
 		},
 		headerFn: firefoxHeaders(version),
 	}, nil
 }
+
+// firefoxPQFrom is the first Firefox major version that offers the hybrid
+// post-quantum group X25519MLKEM768 (4588) by default. Mozilla shipped it on
+// desktop in Firefox 132 (https://bugzilla.mozilla.org/show_bug.cgi?id=1919097);
+// Firefox for Android does not ship it, so it stays desktop-only here.
+//
+// Verified against a real Firefox 151.0.3 capture whose supported_groups list is
+// 4588-29-23-24-25-256-257, giving JA3N 8099457c290ccfe8c6d958826c26b023. JA4
+// does not encode supported_groups at all, so omitting this group still produces
+// a correct-looking JA4 while JA3, JA3N, and peetprint all diverge.
+const firefoxPQFrom = 132
+
+// firefoxUsesPQ reports whether a Firefox build offers X25519MLKEM768.
+func firefoxUsesPQ(majorNum int, p Platform) bool {
+	if majorNum < firefoxPQFrom {
+		return false
+	}
+	switch p {
+	case PlatformAndroid, PlatformIOS, PlatformIPadOS:
+		return false
+	default:
+		return true
+	}
+}
+
+// firefoxDropsECDSACBCFrom is the first Firefox major version that stops
+// offering TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA (0xc009 / 49161), taking the
+// cipher list from 17 entries down to 16.
+//
+// Verified against a real Firefox 151.0.3 capture, which yields JA4
+// t13d1617h2_86a278354501_3cbfd9057e0d. Mozilla tracked the pref flip in
+// https://bugzilla.mozilla.org/show_bug.cgi?id=2035801 (milestone "152
+// Branch"); the captured stable build already omits the cipher, so the
+// observed boundary is used here. Versions 120-150 keep the 17-cipher list.
+const firefoxDropsECDSACBCFrom = 151
 
 func firefoxTLSHelloID(v int) utls.ClientHelloID {
 	switch {
@@ -371,12 +420,62 @@ func safariProfile(version string, platform Platform) (*browserProfile, error) {
 		h2: h2,
 		specFn: func(p Platform) (func() *utls.ClientHelloSpec, error) {
 			if p == PlatformIOS || p == PlatformIPadOS {
-				return newIOSSpecFunc(), nil
+				return newIOSSpecFunc(majorNum), nil
 			}
-			return newSafariMacSpecFunc(), nil
+			return newSafariMacSpecFunc(majorNum), nil
 		},
 		headerFn: safariHeaders(version),
 	}, nil
+}
+
+// safariPQFrom is the first Safari major version that offers the hybrid
+// post-quantum group X25519MLKEM768. Apple enabled it by default across the 26
+// releases (iOS 26, iPadOS 26, macOS Tahoe 26) for everything built on the
+// URLSession and Network frameworks, which includes Safari:
+// https://support.apple.com/en-gb/122756
+//
+// Apple aligned Safari's version number with the OS version at 26, so a single
+// boundary covers macOS, iOS, and iPadOS.
+const safariPQFrom = 26
+
+// currentAppleMajor is the Apple OS version assumed for non-Safari browsers on
+// iOS and iPadOS. Chrome, Edge, and Brave there are WebKit shells over Apple's
+// TLS stack, so the ClientHello follows the OS rather than the browser, and a
+// Chromium version such as 151 says nothing about the OS underneath it.
+const currentAppleMajor = 26
+
+// applyApplePQ adds X25519MLKEM768 to a Safari-family spec, matching Apple's 26
+// releases: the group joins supported_groups ahead of X25519 and a matching key
+// share accompanies the classical X25519 one, so servers without MLKEM768 do not
+// force a HelloRetryRequest.
+//
+// Both lists lead with a GREASE placeholder that has to stay first.
+func applyApplePQ(spec *utls.ClientHelloSpec) {
+	for _, ext := range spec.Extensions {
+		switch e := ext.(type) {
+		case *utls.SupportedCurvesExtension:
+			at := 0
+			if len(e.Curves) > 0 && e.Curves[0] == utls.CurveID(utls.GREASE_PLACEHOLDER) {
+				at = 1
+			}
+			curves := make([]utls.CurveID, 0, len(e.Curves)+1)
+			curves = append(curves, e.Curves[:at]...)
+			curves = append(curves, utls.X25519MLKEM768)
+			curves = append(curves, e.Curves[at:]...)
+			e.Curves = curves
+
+		case *utls.KeyShareExtension:
+			at := 0
+			if len(e.KeyShares) > 0 && e.KeyShares[0].Group == utls.CurveID(utls.GREASE_PLACEHOLDER) {
+				at = 1
+			}
+			shares := make([]utls.KeyShare, 0, len(e.KeyShares)+1)
+			shares = append(shares, e.KeyShares[:at]...)
+			shares = append(shares, utls.KeyShare{Group: utls.X25519MLKEM768})
+			shares = append(shares, e.KeyShares[at:]...)
+			e.KeyShares = shares
+		}
+	}
 }
 
 // safariMacH2Profile matches real Safari on macOS (verified against tls.peet.ws).
@@ -451,8 +550,12 @@ func safariHeaders(version string) func(Platform) (http.Header, error) {
 // Custom iOS TLS spec (built from real iPhone capture, 2026)
 // =====================================================================
 
-// iosTLSSpec returns a ClientHelloSpec matching real iOS 18+/26 (WebKit/Apple TLS).
-// Built from a real iPhone capture rather than relying on utls's outdated HelloIOS_14.
+// iosTLSSpec returns a ClientHelloSpec matching real iOS and iPadOS 18+
+// (WebKit/Apple TLS). Built from a real iPhone capture rather than relying on
+// utls's outdated HelloIOS_14.
+//
+// majorNum gates the post-quantum group: iOS 26 and later advertise
+// X25519MLKEM768, earlier releases do not. See safariPQFrom.
 //
 // Key differences from desktop Chrome:
 //   - Cipher order: 4866-4867-4865 (not 4865-4866-4867)
@@ -461,8 +564,8 @@ func safariHeaders(version string) func(Platform) (http.Header, error) {
 //   - No ECH, no ALPS, no padding
 //   - Duplicate PSSWithSHA384 in sig algs (real iOS behavior)
 //   - rsa_pkcs1_sha1 at end of sig algs
-func iosTLSSpec() *utls.ClientHelloSpec {
-	return &utls.ClientHelloSpec{
+func iosTLSSpec(majorNum int) *utls.ClientHelloSpec {
+	spec := &utls.ClientHelloSpec{
 		TLSVersMax: utls.VersionTLS13,
 		TLSVersMin: utls.VersionTLS10,
 		CipherSuites: []uint16{
@@ -496,7 +599,6 @@ func iosTLSSpec() *utls.ClientHelloSpec {
 			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
 			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
 				utls.GREASE_PLACEHOLDER,
-				utls.X25519MLKEM768,
 				utls.X25519,
 				utls.CurveP256,
 				utls.CurveP384,
@@ -519,7 +621,6 @@ func iosTLSSpec() *utls.ClientHelloSpec {
 			&utls.SCTExtension{},
 			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
 				{Group: utls.CurveID(utls.GREASE_PLACEHOLDER), Data: []byte{0}},
-				{Group: utls.X25519MLKEM768},
 				{Group: utls.X25519},
 			}},
 			&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
@@ -534,11 +635,17 @@ func iosTLSSpec() *utls.ClientHelloSpec {
 			&utls.UtlsGREASEExtension{},
 		},
 	}
+
+	if majorNum >= safariPQFrom {
+		applyApplePQ(spec)
+	}
+
+	return spec
 }
 
-func newIOSSpecFunc() func() *utls.ClientHelloSpec {
+func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 	return func() *utls.ClientHelloSpec {
-		return iosTLSSpec()
+		return iosTLSSpec(majorNum)
 	}
 }
 
@@ -546,13 +653,79 @@ func newIOSSpecFunc() func() *utls.ClientHelloSpec {
 // Custom Chrome 132+ TLS spec (desktop + Android, identical)
 // =====================================================================
 
-// chrome133TLSSpec matches real Chrome 132-145+ on desktop and Android.
+// chrome133TLSSpec matches real Chrome 132-151+ on desktop and Android.
 // MLKEM768 (4588), new ALPS (17613), ECH, brotli compression, extension shuffling.
+// Verified against live capture: JA4 t13d1516h2_8daaf6152771_d8a2da3f94cd,
+// which is also what uTLS HelloChrome_Auto emits.
 //
 // JA3N: 771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,
 //
 //	0-5-10-11-13-16-18-23-27-35-43-45-51-17613-65037-65281,4588-29-23-24,0
-func chrome133TLSSpec() *utls.ClientHelloSpec {
+//
+// Chrome 141+ can additionally send trust_anchors (0xca34) and Chrome 151 Dev
+// can send ML-DSA signature schemes, both behind Finch experiments that are
+// off for most stable builds. They are opt-in via exp; see WithTrustAnchors
+// and WithMLDSA.
+func chrome133TLSSpec(exp chromeExperiments) (*utls.ClientHelloSpec, error) {
+	trustAnchors, err := exp.trustAnchorsExtension()
+	if err != nil {
+		return nil, err
+	}
+
+	exts := []utls.TLSExtension{
+		&utls.UtlsGREASEExtension{},
+		&utls.SNIExtension{},
+		&utls.ExtendedMasterSecretExtension{},
+		&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
+		&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
+			utls.GREASE_PLACEHOLDER,
+			utls.X25519MLKEM768,
+			utls.X25519,
+			utls.CurveP256,
+			utls.CurveP384,
+		}},
+		&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}},
+		&utls.SessionTicketExtension{},
+		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+		&utls.StatusRequestExtension{},
+		&utls.SignatureAlgorithmsExtension{
+			SupportedSignatureAlgorithms: exp.signatureAlgorithms([]utls.SignatureScheme{
+				utls.ECDSAWithP256AndSHA256,
+				utls.PSSWithSHA256,
+				utls.PKCS1WithSHA256,
+				utls.ECDSAWithP384AndSHA384,
+				utls.PSSWithSHA384,
+				utls.PKCS1WithSHA384,
+				utls.PSSWithSHA512,
+				utls.PKCS1WithSHA512,
+			}),
+		},
+		&utls.SCTExtension{},
+		&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
+			{Group: utls.CurveID(utls.GREASE_PLACEHOLDER), Data: []byte{0}},
+			{Group: utls.X25519MLKEM768},
+			{Group: utls.X25519},
+		}},
+		&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
+		&utls.SupportedVersionsExtension{Versions: []uint16{
+			utls.GREASE_PLACEHOLDER,
+			utls.VersionTLS13,
+			utls.VersionTLS12,
+		}},
+		&utls.UtlsCompressCertExtension{Algorithms: []utls.CertCompressionAlgo{
+			utls.CertCompressionBrotli,
+		}},
+		&utls.ApplicationSettingsExtensionNew{SupportedProtocols: []string{"h2"}},
+	}
+
+	// Must be inserted ahead of the trailing GREASE extension: the shuffle
+	// treats GREASE as positionally invariant, so anything appended after it
+	// would pin GREASE off the end of the list.
+	if trustAnchors != nil {
+		exts = append(exts, trustAnchors)
+	}
+	exts = append(exts, utls.BoringGREASEECH(), &utls.UtlsGREASEExtension{})
+
 	return &utls.ClientHelloSpec{
 		CipherSuites: []uint16{
 			utls.GREASE_PLACEHOLDER,
@@ -573,58 +746,23 @@ func chrome133TLSSpec() *utls.ClientHelloSpec {
 			utls.TLS_RSA_WITH_AES_256_CBC_SHA,
 		},
 		CompressionMethods: []byte{0x00},
-		Extensions: utls.ShuffleChromeTLSExtensions([]utls.TLSExtension{
-			&utls.UtlsGREASEExtension{},
-			&utls.SNIExtension{},
-			&utls.ExtendedMasterSecretExtension{},
-			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
-			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
-				utls.GREASE_PLACEHOLDER,
-				utls.X25519MLKEM768,
-				utls.X25519,
-				utls.CurveP256,
-				utls.CurveP384,
-			}},
-			&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}},
-			&utls.SessionTicketExtension{},
-			&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
-			&utls.StatusRequestExtension{},
-			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
-				utls.ECDSAWithP256AndSHA256,
-				utls.PSSWithSHA256,
-				utls.PKCS1WithSHA256,
-				utls.ECDSAWithP384AndSHA384,
-				utls.PSSWithSHA384,
-				utls.PKCS1WithSHA384,
-				utls.PSSWithSHA512,
-				utls.PKCS1WithSHA512,
-			}},
-			&utls.SCTExtension{},
-			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
-				{Group: utls.CurveID(utls.GREASE_PLACEHOLDER), Data: []byte{0}},
-				{Group: utls.X25519MLKEM768},
-				{Group: utls.X25519},
-			}},
-			&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
-			&utls.SupportedVersionsExtension{Versions: []uint16{
-				utls.GREASE_PLACEHOLDER,
-				utls.VersionTLS13,
-				utls.VersionTLS12,
-			}},
-			&utls.UtlsCompressCertExtension{Algorithms: []utls.CertCompressionAlgo{
-				utls.CertCompressionBrotli,
-			}},
-			&utls.ApplicationSettingsExtensionNew{SupportedProtocols: []string{"h2"}},
-			utls.BoringGREASEECH(),
-			&utls.UtlsGREASEExtension{},
-		}),
-	}
+		Extensions:         utls.ShuffleChromeTLSExtensions(exts),
+	}, nil
 }
 
-func newChrome133SpecFunc() func() *utls.ClientHelloSpec {
-	return func() *utls.ClientHelloSpec {
-		return chrome133TLSSpec()
+func newChrome133SpecFunc(exp chromeExperiments) (func() *utls.ClientHelloSpec, error) {
+	// Build once up front so a malformed trust anchor ID surfaces as a client
+	// construction error rather than a silent fallback at handshake time.
+	if _, err := chrome133TLSSpec(exp); err != nil {
+		return nil, err
 	}
+	return func() *utls.ClientHelloSpec {
+		spec, err := chrome133TLSSpec(exp)
+		if err != nil {
+			return nil
+		}
+		return spec
+	}, nil
 }
 
 // =====================================================================
@@ -636,11 +774,18 @@ func newChrome133SpecFunc() func() *utls.ClientHelloSpec {
 // Includes delegated_credentials (34), record_size_limit (28), ECH, brotli.
 // Curves include ffdhe groups (256, 257). No ALPS.
 //
-// JA3N: 771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,
+// majorNum and platform select two version-dependent details: 151+ drops the
+// ECDSA-CBC suite 49161, and 132+ on desktop offers the hybrid post-quantum
+// group X25519MLKEM768. See firefoxDropsECDSACBCFrom and firefoxPQFrom.
+//
+// JA3N (120-131): 771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-156-157-47-53,
 //
 //	0-5-10-11-13-16-23-27-28-34-35-43-45-51-65037-65281,29-23-24-25-256-257,0
-func firefox120TLSSpec() *utls.ClientHelloSpec {
-	return &utls.ClientHelloSpec{
+//
+// Verified live for 151 desktop: JA4 t13d1617h2_86a278354501_3cbfd9057e0d,
+// JA3N 8099457c290ccfe8c6d958826c26b023.
+func firefox120TLSSpec(majorNum int, platform Platform) *utls.ClientHelloSpec {
+	spec := &utls.ClientHelloSpec{
 		TLSVersMax: utls.VersionTLS13,
 		TLSVersMin: utls.VersionTLS10,
 		CipherSuites: []uint16{
@@ -716,11 +861,41 @@ func firefox120TLSSpec() *utls.ClientHelloSpec {
 			utls.BoringGREASEECH(),
 		},
 	}
+
+	if majorNum >= firefoxDropsECDSACBCFrom {
+		filtered := make([]uint16, 0, len(spec.CipherSuites))
+		for _, cs := range spec.CipherSuites {
+			if cs == utls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA {
+				continue
+			}
+			filtered = append(filtered, cs)
+		}
+		spec.CipherSuites = filtered
+	}
+
+	if firefoxUsesPQ(majorNum, platform) {
+		for _, ext := range spec.Extensions {
+			switch e := ext.(type) {
+			case *utls.SupportedCurvesExtension:
+				e.Curves = append([]utls.CurveID{utls.X25519MLKEM768}, e.Curves...)
+			case *utls.KeyShareExtension:
+				// NSS sends a share for the hybrid group plus a classical
+				// X25519 fallback, so servers without MLKEM768 do not force a
+				// HelloRetryRequest.
+				e.KeyShares = []utls.KeyShare{
+					{Group: utls.X25519MLKEM768},
+					{Group: utls.X25519},
+				}
+			}
+		}
+	}
+
+	return spec
 }
 
-func newFirefox120SpecFunc() func() *utls.ClientHelloSpec {
+func newFirefox120SpecFunc(majorNum int, platform Platform) func() *utls.ClientHelloSpec {
 	return func() *utls.ClientHelloSpec {
-		return firefox120TLSSpec()
+		return firefox120TLSSpec(majorNum, platform)
 	}
 }
 
@@ -728,15 +903,18 @@ func newFirefox120SpecFunc() func() *utls.ClientHelloSpec {
 // Custom Safari macOS TLS spec
 // =====================================================================
 
-// safariMacTLSSpec matches real Safari 16-18 on macOS.
+// safariMacTLSSpec matches real Safari 16+ on macOS.
 // Uses zlib compression (not brotli), includes padding (21), no ECH, no ALPS.
 // GREASE throughout. Extension order is fixed (no shuffling).
+//
+// majorNum gates the post-quantum group: Safari 26 on macOS Tahoe 26 and later
+// advertise X25519MLKEM768, earlier releases do not. See safariPQFrom.
 //
 // JA3N: 771,4865-4866-4867-49196-49195-52393-49200-49199-52392-49162-49161-49172-49171-
 //
 //	157-156-53-47-49160-49170-10,0-5-10-11-13-16-18-21-23-27-43-45-51-65281,29-23-24-25,0
-func safariMacTLSSpec() *utls.ClientHelloSpec {
-	return &utls.ClientHelloSpec{
+func safariMacTLSSpec(majorNum int) *utls.ClientHelloSpec {
+	spec := &utls.ClientHelloSpec{
 		TLSVersMax: utls.VersionTLS13,
 		TLSVersMin: utls.VersionTLS10,
 		CipherSuites: []uint16{
@@ -809,11 +987,17 @@ func safariMacTLSSpec() *utls.ClientHelloSpec {
 			&utls.UtlsPaddingExtension{GetPaddingLen: utls.BoringPaddingStyle},
 		},
 	}
+
+	if majorNum >= safariPQFrom {
+		applyApplePQ(spec)
+	}
+
+	return spec
 }
 
-func newSafariMacSpecFunc() func() *utls.ClientHelloSpec {
+func newSafariMacSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 	return func() *utls.ClientHelloSpec {
-		return safariMacTLSSpec()
+		return safariMacTLSSpec(majorNum)
 	}
 }
 
@@ -821,10 +1005,25 @@ func newSafariMacSpecFunc() func() *utls.ClientHelloSpec {
 // Android OkHttp (native Android app fingerprint)
 // =====================================================================
 
+// okhttpModernFrom is the first OkHttp major version that uses the TLS 1.3
+// spec below. uTLS only ships HelloAndroid_11_OkHttp, which is a TLS 1.2-only
+// fingerprint with no ALPN: it cannot negotiate HTTP/2, so clients built on it
+// fall back to HTTP/1.1 and carry no Akamai fingerprint at all. Versions below
+// this keep that legacy preset; 5.x and up get the modern spec.
+const okhttpModernFrom = 5
+
 func okhttpProfile(version string) (*browserProfile, error) {
+	_, majorNum, err := parseMajor(version)
+	if err != nil {
+		return nil, fmt.Errorf("okhttp %s: %w", version, err)
+	}
+
 	return &browserProfile{
 		h2: okhttpH2Profile(),
 		specFn: func(_ Platform) (func() *utls.ClientHelloSpec, error) {
+			if majorNum >= okhttpModernFrom {
+				return newOkHttpSpecFunc(), nil
+			}
 			return newSpecFunc(utls.HelloAndroid_11_OkHttp), nil
 		},
 		headerFn: func(_ Platform) (http.Header, error) {
@@ -833,6 +1032,82 @@ func okhttpProfile(version string) (*browserProfile, error) {
 			return h, nil
 		},
 	}, nil
+}
+
+// okhttpTLSSpec matches OkHttp 5.x on current Android (API 33+), which speaks
+// TLS 1.3 and negotiates HTTP/2 via ALPN. Cipher and extension lists match a
+// real Android 16 / OkHttp 5.3.0 capture; the same shape was contributed
+// upstream as HelloAndroid_16_OkHttp in refraction-networking/utls#399, which
+// is not in a tagged uTLS release yet.
+//
+// Unlike Chrome there is no GREASE, no extension shuffling, no ECH, and no
+// certificate compression. Padding is present. The 15 cipher suites are the
+// same set Chrome offers, so JA4_b matches Chrome's 8daaf6152771.
+//
+// Expected JA4: t13d1513h2_8daaf6152771_eca864cca44a
+func okhttpTLSSpec() *utls.ClientHelloSpec {
+	return &utls.ClientHelloSpec{
+		TLSVersMax: utls.VersionTLS13,
+		TLSVersMin: utls.VersionTLS12,
+		CipherSuites: []uint16{
+			utls.TLS_AES_128_GCM_SHA256,
+			utls.TLS_AES_256_GCM_SHA384,
+			utls.TLS_CHACHA20_POLY1305_SHA256,
+			utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			utls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			utls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			utls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			utls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		},
+		CompressionMethods: []byte{0x00},
+		Extensions: []utls.TLSExtension{
+			&utls.SNIExtension{},
+			&utls.ExtendedMasterSecretExtension{},
+			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
+			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
+				utls.X25519,
+				utls.CurveP256,
+				utls.CurveP384,
+			}},
+			&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}},
+			&utls.SessionTicketExtension{},
+			&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+			&utls.StatusRequestExtension{},
+			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
+				utls.ECDSAWithP256AndSHA256,
+				utls.PSSWithSHA256,
+				utls.PKCS1WithSHA256,
+				utls.ECDSAWithP384AndSHA384,
+				utls.PSSWithSHA384,
+				utls.PKCS1WithSHA384,
+				utls.PSSWithSHA512,
+				utls.PKCS1WithSHA512,
+				utls.PKCS1WithSHA1,
+			}},
+			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
+				{Group: utls.X25519},
+			}},
+			&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
+			&utls.SupportedVersionsExtension{Versions: []uint16{
+				utls.VersionTLS13,
+				utls.VersionTLS12,
+			}},
+			&utls.UtlsPaddingExtension{GetPaddingLen: utls.BoringPaddingStyle},
+		},
+	}
+}
+
+func newOkHttpSpecFunc() func() *utls.ClientHelloSpec {
+	return func() *utls.ClientHelloSpec {
+		return okhttpTLSSpec()
+	}
 }
 
 func okhttpH2Profile() *h2Profile {

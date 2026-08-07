@@ -24,15 +24,15 @@ import (
     http "github.com/saucesteals/fhttp"
 )
 
-client, err := tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac")
+client, err := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
 if err != nil {
     log.Fatal(err)
 }
 defer client.Close()
 
 // client.Info has the matching headers
-fmt.Println(client.Info.UserAgent)      // Mozilla/5.0 ... Chrome/145.0.0.0 ...
-fmt.Println(client.Info.SecChUA)        // "Not:A-Brand";v="99", "Chromium";v="145", ...
+fmt.Println(client.Info.UserAgent)      // Mozilla/5.0 ... Chrome/151.0.0.0 ...
+fmt.Println(client.Info.SecChUA)        // "Not=A?Brand";v="99", "Google Chrome";v="151", ...
 fmt.Println(client.Info.SecChUAPlatform) // "macOS"
 
 resp, err := client.Get("https://tls.peet.ws/api/all")
@@ -56,8 +56,8 @@ client, err := tlsclient.NewClientWithJA3(firefoxJA3, tlsclient.WithH2Profile("f
 
 ```go
 pool := []tlsclient.BrowserSpec{
-    {Browser: "chrome", Version: "145.0.0.0", Platform: "mac"},
-    {Browser: "chrome", Version: "145.0.0.0", Platform: "android"},
+    {Browser: "chrome", Version: "151.0.0.0", Platform: "mac"},
+    {Browser: "chrome", Version: "151.0.0.0", Platform: "android"},
     {Browser: "firefox", Version: "134.0", Platform: "win"},
     {Browser: "safari", Version: "18.3", Platform: "ios"},
 }
@@ -69,7 +69,7 @@ fmt.Println(client.Info.Browser, client.Info.Platform) // whichever was picked
 ### With Options
 
 ```go
-client, err := tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac",
+client, err := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac",
     tlsclient.WithProxy("socks5://user:pass@127.0.0.1:1080"),
     tlsclient.WithTimeout(15 * time.Second),
     tlsclient.WithDialTimeout(5 * time.Second),
@@ -82,7 +82,7 @@ client, err := tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac",
 The client ships with verb helpers that handle body encoding, header ordering, and response decompression (gzip / br / deflate) automatically. Use them anywhere in any repo as a drop-in HTTP layer.
 
 ```go
-client, _ := tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac")
+client, _ := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
 
 resp, err := client.Get("https://api.example.com/v1/users")
 if err != nil {
@@ -225,23 +225,36 @@ Notes:
 - Safari only runs on Apple platforms
 - OkHttp mimics native Android apps using the OkHttp library
 
+Version-dependent behavior worth knowing about:
+
+| Preset | Boundary | Effect |
+|---|---|---|
+| firefox | 132+ desktop | Offers the hybrid post-quantum group `X25519MLKEM768` (4588). Not sent on Android, matching real Firefox. |
+| firefox | 151+ | Drops the ECDSA-CBC cipher 49161, taking the list from 17 suites to 16. |
+| safari | 26+ | Offers `X25519MLKEM768` on macOS, iOS, and iPadOS, which Apple enabled by default across the 26 releases. |
+| okhttp | 5+ | Uses a TLS 1.3 spec that negotiates HTTP/2. Older versions fall back to a TLS 1.2-only fingerprint with no ALPN, so they speak HTTP/1.1 and carry no Akamai fingerprint. |
+
+Chrome, Edge, and Brave on `ios` and `ipados` are WebKit shells over Apple's TLS
+stack, so their ClientHello follows the OS rather than the browser version. They
+always use the current Apple shape, including the post-quantum group.
+
 ### Example Calls
 
 ```go
 // Desktop
-tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac")
-tlsclient.NewClientWithPreset("firefox", "134.0", "win")
+tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
+tlsclient.NewClientWithPreset("firefox", "151.0", "win")
 tlsclient.NewClientWithPreset("safari", "18.3", "mac")
-tlsclient.NewClientWithPreset("edge", "145.0.0.0", "win")
+tlsclient.NewClientWithPreset("edge", "151.0.0.0", "win")
 
 // Mobile
-tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "android")
-tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "ios")
-tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "ipados")
-tlsclient.NewClientWithPreset("firefox", "134.0", "android")
+tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "android")
+tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "ios")
+tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "ipados")
+tlsclient.NewClientWithPreset("firefox", "151.0", "android")
 tlsclient.NewClientWithPreset("safari", "18.3", "ios")
 tlsclient.NewClientWithPreset("safari", "18.3", "ipados")
-tlsclient.NewClientWithPreset("okhttp", "4.12.0", "android")
+tlsclient.NewClientWithPreset("okhttp", "5.3.0", "android")
 ```
 
 ## API Reference
@@ -282,6 +295,38 @@ tlsclient.NewClientWithPreset("okhttp", "4.12.0", "android")
 | `WithForceTLS12()` | false | Pin TLS 1.2 handshake |
 | `WithBypassCache()` | false | Randomize host casing per request |
 | `WithPinnedCerts(pins...)` | none | SPKI SHA-256 SSL pins |
+| `WithTrustAnchors(ids...)` | off | Send `trust_anchors` (0xca34), Chrome 141+ experiment |
+| `WithMLDSA()` | off | Advertise ML-DSA signature schemes, Chrome 151 experiment |
+
+#### Chrome Experiment Options
+
+Current Chrome gates two ClientHello features behind Finch field trials, so
+they are **off by default** — most real Chrome stable traffic does not send
+them, and enabling them unconditionally would make you match a minority of
+users.
+
+`WithTrustAnchors()` adds the `trust_anchors` extension from
+[draft-ietf-tls-trust-anchor-ids](https://tlswg.org/tls-trust-anchor-ids/draft-ietf-tls-trust-anchor-ids.html).
+Chrome 141+ can send it, but as of Chrome 151 it is disabled for most stable
+desktop builds. Enabling it moves the JA4 prefix from `t13d1516h2` (16
+extensions) to `t13d1517h2` (17):
+
+```go
+// Empty list — what Chrome sends on an initial connection.
+client, _ := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac",
+    tlsclient.WithTrustAnchors())
+
+// Or advertise specific IDs, as dotted-decimal relative OIDs.
+client, _ = tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac",
+    tlsclient.WithTrustAnchors("32473.1", "32473.2.1"))
+```
+
+`WithMLDSA()` prepends the post-quantum ML-DSA schemes mldsa44 (`0x0904`),
+mldsa65 (`0x0905`), and mldsa87 (`0x0906`) to `signature_algorithms`, matching
+Chrome 151 Dev builds. This changes the JA4_c hash.
+
+Both options apply to Chromium presets (`chrome`, `edge`, `brave`) on version
+132+ and are ignored by Firefox, Safari, and okhttp.
 
 ### Request Options
 
@@ -321,7 +366,7 @@ Passed to `Get`, `Post`, `Request`, etc. Scope is a single request.
 Cookies are handled automatically by default (like a real browser):
 
 ```go
-client, _ := tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac")
+client, _ := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
 
 // Cookies from the first response are sent in subsequent requests
 client.Get("https://example.com/login")
@@ -336,7 +381,8 @@ cookies := client.Jar().Cookies(someURL)
 | Signal | Matched |
 |--------|---------|
 | TLS ClientHello (ciphers, extensions, curves, key shares) | Yes |
-| JA3 / JA4 / Peetprint | Yes |
+| JA4 / JA3N / Peetprint | Yes |
+| Raw JA3 | Intentionally varies per connection (see below) |
 | HTTP/2 SETTINGS frame (values and order) | Yes |
 | HTTP/2 WINDOW_UPDATE (connection flow) | Yes |
 | HTTP/2 HEADERS priority (weight, dependency, exclusive) | Yes |
@@ -346,6 +392,24 @@ cookies := client.Jar().Cookies(someURL)
 | sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform | Yes (Chromium only) |
 | Cookies | Yes (auto jar) |
 
+### A note on JA3 stability
+
+Chrome has shuffled its ClientHello extension order on every connection since
+version 110, so a raw JA3 hash is not a stable identifier for Chrome and this
+library reproduces that shuffling. Expect a different `ja3_hash` on every
+request from a Chromium preset; matching a single fixed JA3 hash would itself be
+a fingerprinting tell.
+
+The stable equivalents are **JA4**, which sorts extensions, and **JA3N**, the
+normalized JA3 that sorts the extension field. Chromium presets produce JA3N
+`8e19337e7524d2573be54efb2b0784c9` and JA4
+`t13d1516h2_8daaf6152771_d8a2da3f94cd` across mac, Windows, Android, and Edge,
+since Chrome's ClientHello is platform-independent from version 132 on.
+
+Be aware that JA4 does not encode the supported_groups list, so two clients with
+different curves — including a missing post-quantum group — can share a JA4
+while differing in JA3N and peetprint. It is worth checking both.
+
 ## JA3 Format
 
 ```
@@ -354,7 +418,14 @@ TLSVersion,CipherSuites,Extensions,EllipticCurves,EllipticCurvePointFormats
 
 Fields are comma-separated. Values within each field are hyphen-separated. All values are decimal.
 
-The parser handles ECH (65037), ALPS (17613), X25519MLKEM768 (4588), and GREASE values.
+The parser handles ECH (65037), ALPS (17613), X25519MLKEM768 (4588), trust_anchors
+(51764), and GREASE values.
+
+Note that `TLSVersion` is the ClientHello `legacy_version`, which RFC 8446 pins
+to 771 (TLS 1.2) for every TLS 1.3 client; 1.3 is negotiated through the
+supported_versions extension instead. The parser therefore infers TLS 1.3
+support from the presence of a TLS 1.3-only cipher suite (4865-4867) rather than
+from this field, so a browser JA3 negotiates TLS 1.3 and yields a `t13d` JA4.
 
 Capture JA3 strings from [tls.peet.ws](https://tls.peet.ws/api/all) or [ja3er.com](https://ja3er.com/).
 
@@ -404,7 +475,7 @@ go test -v ./... -timeout 60s
 ## CLI Demo
 
 ```bash
-go run ./cmd/example/ -browser chrome -version 145.0.0.0 -platform mac
+go run ./cmd/example/ -browser chrome -version 151.0.0.0 -platform mac
 go run ./cmd/example/ -browser firefox -version 134.0 -platform win
 go run ./cmd/example/ -browser safari -version 18.3 -platform ios
 go run ./cmd/example/ -ja3 '771,4865-4866-4867-...,4588-29-23-24,0'

@@ -73,11 +73,28 @@ func (s *Spec) ClientHelloSpec() *tls.ClientHelloSpec {
 	}
 
 	return &tls.ClientHelloSpec{
-		TLSVersMax:   s.TLSVersion,
+		TLSVersMax:   s.MaxVersion(),
 		TLSVersMin:   tls.VersionTLS10,
 		CipherSuites: s.CipherSuites,
 		Extensions:   extensions,
 	}
+}
+
+// MaxVersion returns the highest TLS version the spec should offer.
+//
+// The first JA3 field is the ClientHello legacy_version, which RFC 8446 pins to
+// 0x0303 (771) for every TLS 1.3 client so middleboxes keep working; 1.3 is
+// negotiated through the supported_versions extension instead. Taking that
+// field literally would cap the handshake at TLS 1.2 and produce a "t12d" JA4
+// where a real browser produces "t13d", so infer 1.3 support from the presence
+// of a TLS 1.3-only cipher suite (0x13xx), which is only usable under 1.3.
+func (s *Spec) MaxVersion() uint16 {
+	for _, cs := range s.CipherSuites {
+		if cs>>8 == 0x13 {
+			return tls.VersionTLS13
+		}
+	}
+	return s.TLSVersion
 }
 
 // ToClientHelloSpec is a convenience that parses a JA3 string and returns a
@@ -137,7 +154,7 @@ func mapExtension(id uint16, s *Spec) tls.TLSExtension {
 	case 35: // session_ticket
 		return &tls.SessionTicketExtension{}
 	case 43: // supported_versions
-		return supportedVersionsExt(s.TLSVersion)
+		return supportedVersionsExt(s.MaxVersion())
 	case 44: // cookie
 		return &tls.CookieExtension{}
 	case 45: // psk_key_exchange_modes
@@ -154,6 +171,11 @@ func mapExtension(id uint16, s *Spec) tls.TLSExtension {
 		return keyShareFromCurves(s.EllipticCurves)
 	case 57: // quic_transport_parameters
 		return &tls.QUICTransportParametersExtension{}
+	case 51764: // trust_anchors (0xca34), Chrome 141+ behind a Finch trial.
+		// A JA3 string carries only extension IDs, so send the empty
+		// RequestedTrustAnchorList that Chrome uses on an initial connection:
+		// a 16-bit length prefix of zero.
+		return &tls.GenericExtension{Id: 51764, Data: []byte{0x00, 0x00}}
 	case 17613: // application_settings (ALPS, new codepoint used by Chrome 107+)
 		return &tls.ApplicationSettingsExtensionNew{SupportedProtocols: []string{"h2"}}
 	case 17513: // application_settings (ALPS, old codepoint)
@@ -188,10 +210,16 @@ func keyShareFromCurves(curves []tls.CurveID) *tls.KeyShareExtension {
 }
 
 func supportedVersionsExt(maxVer uint16) *tls.SupportedVersionsExtension {
-	versions := []uint16{maxVer}
+	// Real TLS 1.3 clients advertise only 1.3 and 1.2 here. Appending 1.1/1.0
+	// would not match any browser and would change the peetprint, whose first
+	// field is this exact list.
 	if maxVer >= tls.VersionTLS13 {
-		versions = append(versions, tls.VersionTLS12)
+		return &tls.SupportedVersionsExtension{Versions: []uint16{
+			tls.VersionTLS13,
+			tls.VersionTLS12,
+		}}
 	}
+	versions := []uint16{maxVer}
 	if maxVer >= tls.VersionTLS12 {
 		versions = append(versions, tls.VersionTLS11, tls.VersionTLS10)
 	}
