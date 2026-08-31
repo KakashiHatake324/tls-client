@@ -120,10 +120,17 @@ func TestMLDSASignatureAlgorithms(t *testing.T) {
 	if got := (chromeExperiments{}).signatureAlgorithms(150, classical); len(got) != 5 {
 		t.Errorf("chrome 150: got %d algorithms, want 5", len(got))
 	}
-	// WithoutMLDSA overrides the version default back off.
+	// WithoutMLDSA overrides the version default back off. Chrome 152 still
+	// leads with a GREASE value, so the classical two are preceded by one entry.
 	off := chromeExperiments{mldsaSet: true, mldsa: false}
-	if got := off.signatureAlgorithms(152, classical); len(got) != 2 {
-		t.Errorf("chrome 152 with WithoutMLDSA: got %d algorithms, want 2", len(got))
+	if got := off.signatureAlgorithms(151, classical); len(got) != 2 {
+		t.Errorf("chrome 151 with WithoutMLDSA: got %d algorithms, want 2", len(got))
+	}
+	got152 := off.signatureAlgorithms(152, classical)
+	if len(got152) != 3 {
+		t.Errorf("chrome 152 with WithoutMLDSA: got %d algorithms, want 3 (GREASE + 2)", len(got152))
+	} else if !isGREASE(uint16(got152[0])) {
+		t.Errorf("chrome 152 sigalgs[0] = %#04x, want a GREASE value", got152[0])
 	}
 
 	got := chromeExperiments{mldsa: true, mldsaSet: true}.signatureAlgorithms(149, classical)
@@ -145,11 +152,13 @@ func TestMLDSASignatureAlgorithms(t *testing.T) {
 // TestChromeSpecExtensionCount confirms the experiments add exactly one
 // extension and that GREASE stays pinned to the end of the shuffled list.
 func TestChromeSpecExtensionCount(t *testing.T) {
-	base, err := chrome133TLSSpec(currentChromeMajor, chromeExperiments{})
+	// Chrome 151 is the last version that does not send trust_anchors by
+	// default, so it is the baseline the extension is added to.
+	base, err := chrome133TLSSpec(151, chromeExperiments{})
 	if err != nil {
 		t.Fatalf("base spec: %v", err)
 	}
-	withTA, err := chrome133TLSSpec(currentChromeMajor, chromeExperiments{trustAnchorsSet: true})
+	withTA, err := chrome133TLSSpec(151, chromeExperiments{trustAnchorsSet: true})
 	if err != nil {
 		t.Fatalf("trust anchors spec: %v", err)
 	}

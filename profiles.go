@@ -128,12 +128,14 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 //	      stays opt-in through WithTrustAnchors
 //	150+: ML-DSA signature schemes advertised BY DEFAULT, ahead of the classical
 //	      algorithms. See chromeMLDSAFrom; override with WithoutMLDSA.
-//	152: no further ClientHello change found. The new PreferSlowKEXAlgorithms
-//	     and PreferSlowCiphers enterprise policies only reorder algorithms when
-//	     an administrator sets them, so the default hello is unaffected.
+//	152: trust_anchors is sent unconditionally with the Chrome Root Store ID
+//	     list, taking the extension count to 17, and a GREASE value is prepended
+//	     to signature_algorithms. See chromeTrustAnchorsFrom and
+//	     chromeGreaseSigAlgsFrom; override with WithoutTrustAnchors.
 //
-// The extension and cipher lists have been stable since 132, so 132 through 152
-// share one spec; only signature_algorithms varies, at the 150 boundary.
+// The cipher list and supported_groups have not moved since 132. Extensions and
+// signature_algorithms both do, at 150 and 152, so one spec covers the range
+// with those two version gates inside it.
 func chromiumTLSHelloID(v int, isAndroid bool) utls.ClientHelloID {
 	switch {
 	case v < 102:
@@ -677,24 +679,30 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 //	0-5-10-11-13-16-18-23-27-35-43-45-51-17613-65037-65281,4588-29-23-24,0
 //	JA3N hash: 8e19337e7524d2573be54efb2b0784c9
 //
-// signature_algorithms is the one part that moves, at Chrome 150, which splits
-// the range into two JA4s:
+// Two version gates move the fingerprint, giving three eras:
 //
-//	132-149: t13d1516h2_8daaf6152771_d8a2da3f94cd  peetprint 1d4ffe9b0e34acac0bd883fa7f79d7b5
-//	150+:    t13d1516h2_8daaf6152771_806a8c22fdea  peetprint 67c3e9111bed9e7f03d2f21d6d88994b
+//	132-149: 16 ext, classical sigalgs
+//	         JA3N 8e19337e7524d2573be54efb2b0784c9
+//	         JA4  t13d1516h2_8daaf6152771_d8a2da3f94cd
+//	150-151: 16 ext, ML-DSA prepended to sigalgs
+//	         JA3N 8e19337e7524d2573be54efb2b0784c9 (unchanged!)
+//	         JA4  t13d1516h2_8daaf6152771_806a8c22fdea
+//	152+:    17 ext (trust_anchors added), GREASE prepended to sigalgs
+//	         JA3N bd4930bd9b000ee684830e44bab76fdf
+//	         JA4  t13d1517h2_8daaf6152771_cb7bf5808d99
 //
-// The 150+ values come from a live capture of Chrome 151.0.7922.174 on macOS
-// (2026-08-30, identical headed and headless). Note that JA3 and JA3N cannot see
-// this change at all — they do not encode signature algorithms — so a JA3N-only
-// check reports a match for a client that no longer looks like Chrome.
+// Every value above comes from a live capture: Chrome 151.0.7922.174 (headed and
+// headless, 2026-08-30) and Chrome 152.0.7977.65 (2026-08-31), both on macOS.
 //
-// uTLS HelloChrome_Auto still emits the pre-150 shape, so it is no longer a
+// The 150 row is the cautionary one: JA3 and JA3N do not encode signature
+// algorithms, so they are byte-identical either side of that change and report a
+// match for a client that no longer looks like Chrome. JA4 and peetprint both
+// catch it.
+//
+// uTLS HelloChrome_Auto still emits the 132-149 shape, so it is no longer a
 // current-Chrome fingerprint on its own.
-//
-// Chrome 141+ can additionally send trust_anchors (0xca34) behind a Finch trial.
-// Stable Chrome 151 does not send it, so it stays opt-in via WithTrustAnchors.
 func chrome133TLSSpec(majorNum int, exp chromeExperiments) (*utls.ClientHelloSpec, error) {
-	trustAnchors, err := exp.trustAnchorsExtension()
+	trustAnchors, err := exp.trustAnchorsExtension(majorNum)
 	if err != nil {
 		return nil, err
 	}

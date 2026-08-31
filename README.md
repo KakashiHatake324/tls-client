@@ -231,6 +231,7 @@ Version-dependent behavior worth knowing about:
 |---|---|---|
 | chrome/edge/brave | 132+ | One ClientHello for every desktop and Android platform: `X25519MLKEM768` (4588), ALPS codepoint 17613, GREASE ECH, brotli certificate compression. Ciphers, extensions, and groups are unchanged through Chrome 152. |
 | chrome/edge/brave | 150+ | Advertises the post-quantum ML-DSA signature schemes mldsa44/65/87 ahead of the classical algorithms. Chrome 150 turned this on for stable. Changes JA4_c and peetprint; JA3 and JA3N cannot see it. Override with `WithoutMLDSA()`. |
+| chrome/edge/brave | 152+ | Sends the `trust_anchors` extension (0xca34) on every hello with the 32 Chrome Root Store IDs, taking the extension count to 17, and prepends a per-connection GREASE value to `signature_algorithms`. Moves both JA3N and JA4. Override with `WithoutTrustAnchors()`. |
 | firefox | 132+ desktop | Offers the hybrid post-quantum group `X25519MLKEM768` (4588). Not sent on Android, matching real Firefox. |
 | firefox | 151+ | Drops the ECDSA-CBC cipher 49161, taking the list from 17 suites to 16. |
 | safari | 26+ | Offers `X25519MLKEM768` on macOS, iOS, and iPadOS, which Apple enabled by default across the 26 releases. |
@@ -300,6 +301,7 @@ tlsclient.NewClientWithPreset("okhttp", "5.3.0", "android")
 | `WithTrustAnchors(ids...)` | off | Send `trust_anchors` (0xca34), Chrome 141+ Finch experiment |
 | `WithMLDSA()` | auto | Force ML-DSA signature schemes on (already the default for Chrome 150+) |
 | `WithoutMLDSA()` | auto | Force ML-DSA off, reproducing the pre-Chrome-150 shape |
+| `WithoutTrustAnchors()` | auto | Force `trust_anchors` off, reproducing the 16-extension shape of Chrome 132-151 |
 | `WithGoogleHeaders(g)` | off | Send `x-client-data` and the `x-browser-*` headers to Google origins |
 
 #### Chrome ClientHello Options
@@ -508,12 +510,21 @@ request from a Chromium preset; matching a single fixed JA3 hash would itself be
 a fingerprinting tell.
 
 The stable equivalents are **JA4**, which sorts extensions, and **JA3N**, the
-normalized JA3 that sorts the extension field. Chromium presets produce JA3N
-`8e19337e7524d2573be54efb2b0784c9` on mac, Windows, Linux, Android, Edge, and
-Brave alike, for every version from 132 through 152 — Chrome's ClientHello is
-platform-independent from version 132 on. JA4 splits at the Chrome 150
-signature-algorithm change: `t13d1516h2_8daaf6152771_d8a2da3f94cd` for 132-149,
-`t13d1516h2_8daaf6152771_806a8c22fdea` for 150+.
+normalized JA3 that sorts the extension field. Chrome's ClientHello is
+platform-independent from version 132 on, so mac, Windows, Linux, Android, Edge,
+and Brave all produce the same values — but the values themselves moved twice,
+giving three eras:
+
+| Chrome | JA3N | JA4 |
+|---|---|---|
+| 132-149 | `8e19337e7524d2573be54efb2b0784c9` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` |
+| 150-151 | `8e19337e7524d2573be54efb2b0784c9` | `t13d1516h2_8daaf6152771_806a8c22fdea` |
+| 152+ | `bd4930bd9b000ee684830e44bab76fdf` | `t13d1517h2_8daaf6152771_cb7bf5808d99` |
+
+Look at the 150 row: **JA3N is identical either side of it.** ML-DSA lives in
+`signature_algorithms`, which JA3 does not encode, so a JA3N check reports a
+perfect match for a client that no longer resembles Chrome. Chrome 152 then adds
+the `trust_anchors` extension, which JA3N does see.
 
 `ja4_test.go` marshals the ClientHello each preset would send and recomputes
 JA3, JA3N, and JA4 from the raw bytes, so those values are pinned offline as

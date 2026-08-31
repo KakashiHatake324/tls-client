@@ -122,30 +122,43 @@ func pseudoOrder(headers []string) string {
 // ---------------------------------------------------------------------------
 
 // TestPresetChromeDesktopLive checks Chrome 151 and 152 against real Chrome.
+// They are NOT the same: 152 adds the trust_anchors extension and a GREASE
+// signature algorithm, so it has its own JA3N and JA4. Values come from local
+// captures of Chrome 151.0.7922.174 and Chrome 152.0.7977.65 on macOS.
 //
-// Both send the Chrome 150+ shape, whose signature_algorithms lead with the
-// ML-DSA schemes. The expected values come from a ClientHello captured off the
-// wire from Chrome 151.0.7922.174 on macOS (2026-08-30):
-//
-//	peetprint GREASE-772-771|2-1.1|GREASE-4588-29-23-24|
-//	          2308-2309-2310-1027-2052-1025-1283-2053-1281-2054-1537|1|2|
-//	          GREASE-4865-...-53|0-10-11-13-16-17613-18-23-27-35-43-45-5-51-65037-65281-GREASE-GREASE
-//
-// The offline equivalent, which pins the same JA4 without the network, is
+// The offline equivalent, which pins the same values without the network, is
 // TestChromeModernFingerprint.
 func TestPresetChromeDesktopLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
 
-	// md5 of the peetprint string above; the pre-150 value was
-	// 1d4ffe9b0e34acac0bd883fa7f79d7b5, which differs only in the
-	// signature_algorithms field.
-	const wantPeetprint = "67c3e9111bed9e7f03d2f21d6d88994b"
+	cases := []struct {
+		version string
+		ja4     string
+		ja3n    string
+		// peetprint is asserted only where the expected value is known. For
+		// Chrome 152 it is not: peetprint includes the signature algorithms and
+		// it is unverified whether tls.peet.ws strips the GREASE entry Chrome
+		// 152 leads with, so the value is logged instead of pinned.
+		peetprint string
+	}{
+		{
+			version:   "151.0.0.0",
+			ja4:       chromeJA4From150,
+			ja3n:      chromeJA3NHash,
+			peetprint: "67c3e9111bed9e7f03d2f21d6d88994b",
+		},
+		{
+			version: "152.0.0.0",
+			ja4:     chromeJA4From152,
+			ja3n:    chromeJA3NTrustAnchorsHash,
+		},
+	}
 
-	for _, version := range []string{"151.0.0.0", "152.0.0.0"} {
-		t.Run(version, func(t *testing.T) {
-			c, err := NewClientWithPreset("chrome", version, "mac")
+	for _, tc := range cases {
+		t.Run(tc.version, func(t *testing.T) {
+			c, err := NewClientWithPreset("chrome", tc.version, "mac")
 			if err != nil {
 				t.Fatalf("new client: %v", err)
 			}
@@ -153,17 +166,16 @@ func TestPresetChromeDesktopLive(t *testing.T) {
 
 			pr := fetchPeet(t, c)
 
-			// TLS: must match real Chrome peetprint, JA4, and JA3N
-			if pr.TLS.PeetprintHash != wantPeetprint {
-				t.Errorf("peetprint_hash = %q, want %q\n  got peetprint: %s",
-					pr.TLS.PeetprintHash, wantPeetprint, pr.TLS.Peetprint)
-			}
-			if pr.TLS.JA4 != chromeJA4From150 {
-				t.Errorf("ja4 = %q, want %q", pr.TLS.JA4, chromeJA4From150)
+			if pr.TLS.JA4 != tc.ja4 {
+				t.Errorf("ja4 = %q, want %q", pr.TLS.JA4, tc.ja4)
 			}
 			norm, gotJA3N := ja3n(pr.TLS.JA3)
-			if gotJA3N != chromeJA3NHash {
-				t.Errorf("ja3n = %q, want %q\n  normalized: %s", gotJA3N, chromeJA3NHash, norm)
+			if gotJA3N != tc.ja3n {
+				t.Errorf("ja3n = %q, want %q\n  normalized: %s", gotJA3N, tc.ja3n, norm)
+			}
+			if tc.peetprint != "" && pr.TLS.PeetprintHash != tc.peetprint {
+				t.Errorf("peetprint_hash = %q, want %q\n  got peetprint: %s",
+					pr.TLS.PeetprintHash, tc.peetprint, pr.TLS.Peetprint)
 			}
 
 			// HTTP/2: Chrome SETTINGS + m,a,s,p + priority
@@ -173,7 +185,6 @@ func TestPresetChromeDesktopLive(t *testing.T) {
 				true,
 			)
 
-			// Headers
 			if c.Info.SecChUA == "" {
 				t.Error("SecChUA should be set for Chrome")
 			}
@@ -181,10 +192,9 @@ func TestPresetChromeDesktopLive(t *testing.T) {
 				t.Errorf("SecChUAMobile = %q, want ?0", c.Info.SecChUAMobile)
 			}
 
-			t.Logf("JA3 Hash: %s", pr.TLS.JA3Hash)
 			t.Logf("JA4: %s", pr.TLS.JA4)
+			t.Logf("peetprint: %s (%s)", pr.TLS.PeetprintHash, pr.TLS.Peetprint)
 			t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
-			t.Logf("Akamai Hash: %s", pr.HTTP2.AkamaiFingerprintHash)
 		})
 	}
 }
@@ -206,8 +216,9 @@ func TestPresetChromeMobileAndroid(t *testing.T) {
 
 	pr := fetchPeet(t, c)
 
-	// Same TLS as desktop Chrome, including the Chrome 150+ ML-DSA algorithms:
-	// the Chrome Enterprise notes list Android among the platforms that got them.
+	// Same TLS as desktop Chrome 151, including the Chrome 150+ ML-DSA
+	// algorithms: the Chrome Enterprise notes list Android among the platforms
+	// that got them.
 	if pr.TLS.PeetprintHash != "67c3e9111bed9e7f03d2f21d6d88994b" {
 		t.Errorf("peetprint_hash = %q, want 67c3e9111bed9e7f03d2f21d6d88994b\n  got peetprint: %s",
 			pr.TLS.PeetprintHash, pr.TLS.Peetprint)

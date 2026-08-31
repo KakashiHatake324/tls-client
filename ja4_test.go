@@ -209,9 +209,19 @@ func (h helloInfo) ja4() string {
 	}
 	sort.Slice(exts, func(i, j int) bool { return exts[i] < exts[j] })
 
+	// GREASE values are ignored everywhere in JA4, signature_algorithms
+	// included — Chrome 152 leads the list with one, and counting it would
+	// make JA4_c random per connection.
+	sigAlgs := make([]uint16, 0, len(h.sigAlgs))
+	for _, a := range h.sigAlgs {
+		if !isGREASE(a) {
+			sigAlgs = append(sigAlgs, a)
+		}
+	}
+
 	c := joinHex(exts, ",")
-	if len(h.sigAlgs) > 0 {
-		c += "_" + joinHex(h.sigAlgs, ",")
+	if len(sigAlgs) > 0 {
+		c += "_" + joinHex(sigAlgs, ",")
 	}
 
 	return fmt.Sprintf("%s_%s_%s", a, b, truncHash(c))
@@ -356,28 +366,41 @@ func fingerprintPreset(t *testing.T, browser, version string, platform Platform,
 	return raw, norm, ja3nHash, info.ja4()
 }
 
-// Reference fingerprints for the Chromium ClientHello shape shipped from Chrome
-// 132 onward. The cipher list, extension set, and groups are identical across
-// the whole range, so JA3N never moves; signature_algorithms changes at Chrome
-// 150, which splits JA4_c in two.
+// Reference fingerprints for the Chromium ClientHello, all captured off the wire
+// from real browsers with a local ClientHello dump:
 //
-// The 150+ values were captured off the wire from Chrome 151.0.7922.174 on
-// macOS (2026-08-30), headed and headless, via a local ClientHello dump.
+//	Chrome 151.0.7922.174 macOS, headed and headless (2026-08-30)
+//	Chrome 152.0.7977.65  macOS, fresh profile          (2026-08-31)
+//
+// Three eras, each differing from the last in exactly one place:
+//
+//	132-149  classical signature algorithms, 16 extensions
+//	150-151  ML-DSA prepended to signature_algorithms   (JA4_c moves; JA3N does not)
+//	152+     trust_anchors extension added, 17 extensions, and a GREASE value
+//	         prepended to signature_algorithms          (JA3N and JA4 both move)
 const (
+	// 16-extension JA3N, Chrome 132 through 151.
 	chromeJA3N = "771," +
 		"4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53," +
 		"0-5-10-11-13-16-18-23-27-35-43-45-51-17613-65037-65281," +
 		"4588-29-23-24,0"
 	chromeJA3NHash = "8e19337e7524d2573be54efb2b0784c9"
 
-	// Chrome 132-149: classical signature algorithms only.
-	chromeJA4Pre150 = "t13d1516h2_8daaf6152771_d8a2da3f94cd"
-	// Chrome 150+: ML-DSA advertised ahead of the classical algorithms.
-	chromeJA4From150 = "t13d1516h2_8daaf6152771_806a8c22fdea"
+	// 17-extension JA3N, Chrome 152+: trust_anchors (51764) joins the list.
+	chromeJA3NTrustAnchors = "771," +
+		"4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53," +
+		"0-5-10-11-13-16-18-23-27-35-43-45-51-17613-51764-65037-65281," +
+		"4588-29-23-24,0"
+	chromeJA3NTrustAnchorsHash = "bd4930bd9b000ee684830e44bab76fdf"
+
+	chromeJA4Pre150  = "t13d1516h2_8daaf6152771_d8a2da3f94cd" // 132-149
+	chromeJA4From150 = "t13d1516h2_8daaf6152771_806a8c22fdea" // 150-151
+	chromeJA4From152 = "t13d1517h2_8daaf6152771_cb7bf5808d99" // 152+
 )
 
-// chromeSigAlgsFrom150 is the exact signature_algorithms list real Chrome 151
-// sends, in wire order, from the capture referenced above.
+// chromeSigAlgsFrom150 is the signature_algorithms list real Chrome 151 sends,
+// in wire order. Chrome 152 sends the same list behind a per-connection GREASE
+// value.
 var chromeSigAlgsFrom150 = []uint16{
 	0x0904, 0x0905, 0x0906, // mldsa44, mldsa65, mldsa87
 	0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
@@ -385,49 +408,57 @@ var chromeSigAlgsFrom150 = []uint16{
 
 var chromeSigAlgsPre150 = chromeSigAlgsFrom150[3:]
 
-func wantJA4(major int) string {
-	if major >= chromeMLDSAFrom {
-		return chromeJA4From150
+// want returns the expected fingerprint triple for a Chrome major version.
+func wantFingerprint(major int) (ja3n, ja3nHash, ja4 string) {
+	switch {
+	case major >= chromeTrustAnchorsFrom:
+		return chromeJA3NTrustAnchors, chromeJA3NTrustAnchorsHash, chromeJA4From152
+	case major >= chromeMLDSAFrom:
+		return chromeJA3N, chromeJA3NHash, chromeJA4From150
+	default:
+		return chromeJA3N, chromeJA3NHash, chromeJA4Pre150
 	}
-	return chromeJA4Pre150
+}
+
+// stripGREASE drops GREASE codepoints, which every fingerprint ignores.
+func stripGREASE(vals []uint16) []uint16 {
+	out := make([]uint16, 0, len(vals))
+	for _, v := range vals {
+		if !isGREASE(v) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // TestChromeModernFingerprint pins JA3N and JA4 for every Chromium preset on the
-// current ClientHello shape, across the Chrome 150 signature_algorithms boundary.
+// current ClientHello shape, across both boundaries that move a fingerprint:
+// ML-DSA at Chrome 150 and trust_anchors at Chrome 152.
 //
-// JA3N is deliberately asserted to be the SAME on both sides of that boundary:
-// JA3 does not encode signature algorithms, so it cannot see the ML-DSA change.
-// That is why JA4 is pinned alongside it — a JA3N-only check passes for a client
-// that no longer matches Chrome.
+// Note that 150 and 151 share a JA3N with 132 while their JA4 differs: JA3 does
+// not encode signature algorithms, so a JA3N-only check passes for a client that
+// no longer matches Chrome. The 152 change moves both.
 func TestChromeModernFingerprint(t *testing.T) {
-	versions := []struct {
-		version string
-		major   int
-	}{
-		{"132.0.0.0", 132},
-		{"133.0.0.0", 133},
-		{"149.0.0.0", 149},
-		{"150.0.0.0", 150},
-		{"151.0.0.0", 151},
-		{"152.0.0.0", 152},
-	}
+	versions := []int{132, 133, 149, 150, 151, 152, 153}
 	platforms := []Platform{PlatformMac, PlatformWindows, PlatformLinux, PlatformAndroid}
 	browsers := []string{"chrome", "edge", "brave"}
 
 	for _, browser := range browsers {
-		for _, v := range versions {
+		for _, major := range versions {
 			for _, platform := range platforms {
-				name := fmt.Sprintf("%s/%s/%s", browser, v.version, platform)
-				t.Run(name, func(t *testing.T) {
-					_, norm, hash, ja4 := fingerprintPreset(t, browser, v.version, platform)
-					if norm != chromeJA3N {
-						t.Errorf("ja3n = %q, want %q", norm, chromeJA3N)
+				version := fmt.Sprintf("%d.0.0.0", major)
+				t.Run(fmt.Sprintf("%s/%s/%s", browser, version, platform), func(t *testing.T) {
+					wantJA3N, wantHash, wantJA4 := wantFingerprint(major)
+
+					_, norm, hash, ja4 := fingerprintPreset(t, browser, version, platform)
+					if norm != wantJA3N {
+						t.Errorf("ja3n = %q, want %q", norm, wantJA3N)
 					}
-					if hash != chromeJA3NHash {
-						t.Errorf("ja3n hash = %q, want %q", hash, chromeJA3NHash)
+					if hash != wantHash {
+						t.Errorf("ja3n hash = %q, want %q", hash, wantHash)
 					}
-					if want := wantJA4(v.major); ja4 != want {
-						t.Errorf("ja4 = %q, want %q", ja4, want)
+					if ja4 != wantJA4 {
+						t.Errorf("ja4 = %q, want %q", ja4, wantJA4)
 					}
 				})
 			}
@@ -435,54 +466,118 @@ func TestChromeModernFingerprint(t *testing.T) {
 	}
 }
 
-// TestChromeMLDSABoundary pins the Chrome 150 signature_algorithms boundary
-// itself: 150 and up advertise mldsa44/65/87 ahead of the classical algorithms,
-// earlier versions do not, and the classical tail is untouched either way.
-func TestChromeMLDSABoundary(t *testing.T) {
-	cases := []struct {
-		version string
-		want    []uint16
-	}{
-		{"132.0.0.0", chromeSigAlgsPre150},
-		{"149.0.0.0", chromeSigAlgsPre150},
-		{"150.0.0.0", chromeSigAlgsFrom150},
-		{"151.0.0.0", chromeSigAlgsFrom150},
-		{"152.0.0.0", chromeSigAlgsFrom150},
-	}
+// TestChromeTrustAnchorsBoundary pins the Chrome 152 boundary: trust_anchors
+// (51764) is sent by default from 152, carrying the Chrome Root Store IDs, and
+// is absent before that.
+func TestChromeTrustAnchorsBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		major int
+		want  bool
+	}{{149, false}, {150, false}, {151, false}, {152, true}, {153, true}} {
+		t.Run(fmt.Sprintf("%d", tc.major), func(t *testing.T) {
+			info := presetHello(t, "chrome", fmt.Sprintf("%d.0.0.0", tc.major), PlatformMac)
 
-	for _, tc := range cases {
-		t.Run(tc.version, func(t *testing.T) {
-			info := presetHello(t, "chrome", tc.version, PlatformMac)
-			if !equalU16(info.sigAlgs, tc.want) {
-				t.Errorf("signature_algorithms = %v, want %v", info.sigAlgs, tc.want)
+			got := false
+			for _, e := range info.extensions {
+				if e == 51764 {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("chrome %d: trust_anchors present = %v, want %v", tc.major, got, tc.want)
+			}
+			wantCount := 16
+			if tc.want {
+				wantCount = 17
+			}
+			if len(info.extensions) != wantCount {
+				t.Errorf("chrome %d: %d extensions, want %d", tc.major, len(info.extensions), wantCount)
 			}
 		})
 	}
 }
 
-// TestChromeMLDSAOverrides covers forcing the boundary either way: WithMLDSA on
-// an older version, WithoutMLDSA on a newer one.
+// TestChromeTrustAnchorIDsMatchCapture checks the extension body against the
+// bytes real Chrome 152 put on the wire: a 204-byte list of 32 IDs.
+func TestChromeTrustAnchorIDsMatchCapture(t *testing.T) {
+	const wantBody = "00cc04d679090608839a648c9b2d010704d679090c0582df1302060582df13021308839a648c9b2d010d04d67909010582df13020d04d679090d0582df13020f08839a648c9b2d01080582df13021208839a648c9b2d010904d67909020582df13020104d679090e04d679090908839a648c9b2d010a04d679090304d679090f08839a648c9b2d010b04d67909040582df13021404d679090a08839a648c9b2d011308839a648c9b2d011204d679090704d679090808839a648c9b2d010c04d67909050582df13020e04d679090b"
+
+	ext, err := buildTrustAnchorsExtension(chromeRootStoreTrustAnchorIDs)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := fmt.Sprintf("%x", ext.Data); got != wantBody {
+		t.Errorf("trust_anchors body mismatch\n  got:  %s\n  want: %s", got, wantBody)
+	}
+	if len(chromeRootStoreTrustAnchorIDs) != 32 {
+		t.Errorf("%d trust anchor IDs, want 32", len(chromeRootStoreTrustAnchorIDs))
+	}
+}
+
+// TestChromeSigAlgsByVersion pins the signature_algorithms list per era,
+// including the GREASE value Chrome 152 leads with.
+func TestChromeSigAlgsByVersion(t *testing.T) {
+	for _, tc := range []struct {
+		major      int
+		want       []uint16
+		wantGREASE bool
+	}{
+		{132, chromeSigAlgsPre150, false},
+		{149, chromeSigAlgsPre150, false},
+		{150, chromeSigAlgsFrom150, false},
+		{151, chromeSigAlgsFrom150, false},
+		{152, chromeSigAlgsFrom150, true},
+	} {
+		t.Run(fmt.Sprintf("%d", tc.major), func(t *testing.T) {
+			info := presetHello(t, "chrome", fmt.Sprintf("%d.0.0.0", tc.major), PlatformMac)
+
+			gotGREASE := len(info.sigAlgs) > 0 && isGREASE(info.sigAlgs[0])
+			if gotGREASE != tc.wantGREASE {
+				t.Errorf("leading GREASE = %v, want %v (list %#04x)", gotGREASE, tc.wantGREASE, info.sigAlgs)
+			}
+			if got := stripGREASE(info.sigAlgs); !equalU16(got, tc.want) {
+				t.Errorf("signature_algorithms = %#04x, want %#04x", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestChromeGreaseSigAlgVaries checks that the Chrome 152 GREASE value is drawn
+// fresh per connection. uTLS has no GREASE substitution for
+// signature_algorithms, so a placeholder left in the spec would ship as a
+// constant 0x0a0a on every request, which real Chrome never does.
+func TestChromeGreaseSigAlgVaries(t *testing.T) {
+	seen := map[uint16]bool{}
+	for i := 0; i < 64; i++ {
+		info := presetHello(t, "chrome", "152.0.0.0", PlatformMac)
+		if len(info.sigAlgs) == 0 || !isGREASE(info.sigAlgs[0]) {
+			t.Fatalf("no leading GREASE value: %#04x", info.sigAlgs)
+		}
+		seen[info.sigAlgs[0]] = true
+	}
+	if len(seen) < 4 {
+		t.Errorf("only %d distinct GREASE values across 64 hellos; it is not varying", len(seen))
+	}
+}
+
+// TestChromeMLDSAOverrides covers forcing the ML-DSA boundary either way.
 func TestChromeMLDSAOverrides(t *testing.T) {
 	cases := []struct {
 		name    string
 		version string
 		opts    []Option
 		want    []uint16
-		wantJA4 string
 	}{
-		{"149-forced-on", "149.0.0.0", []Option{WithMLDSA()}, chromeSigAlgsFrom150, chromeJA4From150},
-		{"152-forced-off", "152.0.0.0", []Option{WithoutMLDSA()}, chromeSigAlgsPre150, chromeJA4Pre150},
-		{"152-forced-on-is-noop", "152.0.0.0", []Option{WithMLDSA()}, chromeSigAlgsFrom150, chromeJA4From150},
+		{"149-forced-on", "149.0.0.0", []Option{WithMLDSA()}, chromeSigAlgsFrom150},
+		{"152-forced-off", "152.0.0.0", []Option{WithoutMLDSA()}, chromeSigAlgsPre150},
+		{"152-forced-on-is-noop", "152.0.0.0", []Option{WithMLDSA()}, chromeSigAlgsFrom150},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			info := presetHello(t, "chrome", tc.version, PlatformMac, tc.opts...)
-			if !equalU16(info.sigAlgs, tc.want) {
-				t.Errorf("signature_algorithms = %v, want %v", info.sigAlgs, tc.want)
-			}
-			if got := info.ja4(); got != tc.wantJA4 {
-				t.Errorf("ja4 = %q, want %q", got, tc.wantJA4)
+			if got := stripGREASE(info.sigAlgs); !equalU16(got, tc.want) {
+				t.Errorf("signature_algorithms = %#04x, want %#04x", got, tc.want)
 			}
 		})
 	}
@@ -496,11 +591,11 @@ func TestChromeExtensionShufflingVariesJA3(t *testing.T) {
 	for i := 0; i < 16; i++ {
 		raw, norm, _, ja4 := fingerprintPreset(t, "chrome", "152.0.0.0", PlatformMac)
 		seen[raw] = true
-		if norm != chromeJA3N {
-			t.Fatalf("ja3n = %q, want %q", norm, chromeJA3N)
+		if norm != chromeJA3NTrustAnchors {
+			t.Fatalf("ja3n = %q, want %q", norm, chromeJA3NTrustAnchors)
 		}
-		if ja4 != chromeJA4From150 {
-			t.Fatalf("ja4 = %q, want %q", ja4, chromeJA4From150)
+		if ja4 != chromeJA4From152 {
+			t.Fatalf("ja4 = %q, want %q", ja4, chromeJA4From152)
 		}
 	}
 	if len(seen) < 2 {
@@ -508,26 +603,20 @@ func TestChromeExtensionShufflingVariesJA3(t *testing.T) {
 	}
 }
 
-// TestChromeTrustAnchorsFingerprint pins the one genuinely opt-in extension.
-// trust_anchors adds extension 51764 (0xca34), moving the JA4 prefix to
-// t13d1517h2 and changing JA3N, which — unlike signature algorithms — does cover
-// the extension list.
-func TestChromeTrustAnchorsFingerprint(t *testing.T) {
-	const trustAnchorsJA3N = "771," +
-		"4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53," +
-		"0-5-10-11-13-16-18-23-27-35-43-45-51-17613-51764-65037-65281," +
-		"4588-29-23-24,0"
-
+// TestChromeTrustAnchorOverrides covers overriding the 152 default: a custom ID
+// list, and turning the extension off to get the 16-extension shape back.
+func TestChromeTrustAnchorOverrides(t *testing.T) {
 	cases := []struct {
 		name     string
 		opts     []Option
 		wantJA3N string
 		wantJA4  string
 	}{
-		{"default", nil, chromeJA3N, chromeJA4From150},
-		{"trust-anchors", []Option{WithTrustAnchors()}, trustAnchorsJA3N, "t13d1517h2_8daaf6152771_cb7bf5808d99"},
-		{"trust-anchors-no-mldsa", []Option{WithTrustAnchors(), WithoutMLDSA()}, trustAnchorsJA3N, "t13d1517h2_8daaf6152771_dcad5a053991"},
-		{"no-mldsa", []Option{WithoutMLDSA()}, chromeJA3N, chromeJA4Pre150},
+		{"default", nil, chromeJA3NTrustAnchors, chromeJA4From152},
+		{"custom ids", []Option{WithTrustAnchors("32473.1", "32473.2.1")}, chromeJA3NTrustAnchors, chromeJA4From152},
+		{"empty list", []Option{WithTrustAnchors()}, chromeJA3NTrustAnchors, chromeJA4From152},
+		{"disabled", []Option{WithoutTrustAnchors()}, chromeJA3N, chromeJA4From150},
+		{"disabled, no mldsa", []Option{WithoutTrustAnchors(), WithoutMLDSA()}, chromeJA3N, chromeJA4Pre150},
 	}
 
 	for _, tc := range cases {
@@ -549,11 +638,12 @@ func TestChromeTrustAnchorsFingerprint(t *testing.T) {
 func TestChromeSecChUAByVersion(t *testing.T) {
 	// Derived from Chromium's GetUserAgentBrandList: the greasy brand is
 	// "Not" + greasyChars[v%11] + "A" + greasyChars[(v+1)%11] + "Brand" at
-	// version greasyVersion[v%3], and the three brands are laid out in
-	// greasyOrders[v%6].
+	// version greasyVersion[v%3], laid out in greasyOrders[v%6].
 	//
 	//	151: chars[8]="=", chars[9]="?", version[1]="99", order[1]={0,2,1}
 	//	152: chars[9]="?", chars[10]="_", version[2]="24", order[2]={1,0,2}
+	//
+	// The 151 line is confirmed by a real Chrome 151.0.7922.174 request.
 	cases := []struct {
 		version string
 		want    string

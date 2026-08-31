@@ -112,6 +112,18 @@ func WithTrustAnchors(ids ...string) Option {
 	return func(c *Client) {
 		c.experiments.trustAnchors = append([]string(nil), ids...)
 		c.experiments.trustAnchorsSet = true
+		c.experiments.trustAnchorsOff = false
+	}
+}
+
+// WithoutTrustAnchors removes the trust_anchors extension from a Chromium preset
+// that would otherwise send it (version 152 and up), reproducing the 16-extension
+// shape of Chrome 132-151. Chromium presets only.
+func WithoutTrustAnchors() Option {
+	return func(c *Client) {
+		c.experiments.trustAnchorsOff = true
+		c.experiments.trustAnchorsSet = false
+		c.experiments.trustAnchors = nil
 	}
 }
 
@@ -389,8 +401,10 @@ func (c *Client) validate() error {
 	}
 	// Surface malformed trust anchor IDs at construction time rather than
 	// silently emitting a broken ClientHello on the first request.
-	if _, err := c.experiments.trustAnchorsExtension(); err != nil {
-		return err
+	if c.experiments.trustAnchorsSet {
+		if _, err := buildTrustAnchorsExtension(c.experiments.trustAnchors); err != nil {
+			return err
+		}
 	}
 	return nil
 }

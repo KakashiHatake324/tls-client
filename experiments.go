@@ -2,6 +2,7 @@ package tlsclient
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 
@@ -38,17 +39,80 @@ const (
 // passing while the client no longer matches Chrome.
 const chromeMLDSAFrom = 150
 
+// chromeTrustAnchorsFrom is the first Chrome major version that sends the
+// trust_anchors extension (0xca34) on every ClientHello, carrying the Chrome
+// Root Store trust anchor IDs rather than an empty list.
+//
+// Through Chrome 151 this was gated behind the TLSTrustAnchorIDs Finch trial and
+// off for stable. Chrome 152 turned it on unconditionally: a capture of
+// 152.0.7977.65 (macOS, fresh profile, 2026-08-31) carries a 210-byte extension
+// with the 32 IDs in chromeRootStoreTrustAnchorIDs. That takes the extension
+// count from 16 to 17 and moves JA3N and the JA4 prefix.
+const chromeTrustAnchorsFrom = 152
+
+// chromeGreaseSigAlgsFrom is the first Chrome major version that prepends a
+// GREASE value to signature_algorithms, alongside the GREASE it already places
+// in ciphers, extensions, groups, key shares, and supported_versions.
+//
+// Also new in Chrome 152: the same capture shows a fresh GREASE codepoint per
+// connection (0x6a6a then 0x2a2a on consecutive hellos) ahead of the ML-DSA
+// entries, making the list 12 long. JA4 ignores GREASE, so JA4_c is unaffected
+// for implementations that follow the spec.
+const chromeGreaseSigAlgsFrom = 152
+
+// chromeRootStoreTrustAnchorIDs is the trust anchor ID list Chrome 152 sends,
+// decoded from a live capture. The IDs are dotted-decimal relative OIDs:
+// 11129.9.x is Google Trust Services, 44947.2.x is ISRG (Let's Encrypt), and
+// 52580.200109.1.x is a third CA family.
+//
+// Chrome iterates a hash set to build this, so the order differs between
+// browser processes while the set does not. The order below is one real
+// capture's; since neither JA3 nor JA4 covers extension bodies, it affects only
+// the raw bytes.
+var chromeRootStoreTrustAnchorIDs = []string{
+	"11129.9.6", "52580.200109.1.7", "11129.9.12", "44947.2.6",
+	"44947.2.19", "52580.200109.1.13", "11129.9.1", "44947.2.13",
+	"11129.9.13", "44947.2.15", "52580.200109.1.8", "44947.2.18",
+	"52580.200109.1.9", "11129.9.2", "44947.2.1", "11129.9.14",
+	"11129.9.9", "52580.200109.1.10", "11129.9.3", "11129.9.15",
+	"52580.200109.1.11", "11129.9.4", "44947.2.20", "11129.9.10",
+	"52580.200109.1.19", "52580.200109.1.18", "11129.9.7", "11129.9.8",
+	"52580.200109.1.12", "11129.9.5", "44947.2.14", "11129.9.11",
+}
+
 // chromeExperiments holds ClientHello features whose presence depends on the
 // Chrome version or on a Finch field trial, together with any caller override.
 type chromeExperiments struct {
 	trustAnchors    []string
 	trustAnchorsSet bool
+	trustAnchorsOff bool
 	mldsa           bool
 	mldsaSet        bool
 }
 
 func (e chromeExperiments) any() bool {
-	return e.trustAnchorsSet || e.mldsaSet
+	return e.trustAnchorsSet || e.trustAnchorsOff || e.mldsaSet
+}
+
+// usesTrustAnchors reports whether a Chrome build of this major version sends
+// the trust_anchors extension, honouring an explicit override.
+func (e chromeExperiments) usesTrustAnchors(majorNum int) bool {
+	if e.trustAnchorsOff {
+		return false
+	}
+	if e.trustAnchorsSet {
+		return true
+	}
+	return majorNum >= chromeTrustAnchorsFrom
+}
+
+// trustAnchorIDs returns the IDs to advertise: the caller's list when one was
+// given, otherwise the Chrome Root Store set real Chrome 152 sends.
+func (e chromeExperiments) trustAnchorIDs() []string {
+	if e.trustAnchorsSet {
+		return e.trustAnchors
+	}
+	return chromeRootStoreTrustAnchorIDs
 }
 
 // usesMLDSA reports whether a Chrome build of this major version advertises the
@@ -62,23 +126,45 @@ func (e chromeExperiments) usesMLDSA(majorNum int) bool {
 }
 
 // signatureAlgorithms returns the signature_algorithms list for a Chromium
-// spec, prepending the ML-DSA schemes for the versions that send them.
+// spec: a GREASE placeholder for the versions that lead with one, then the
+// ML-DSA schemes for the versions that send them, then the classical set.
 func (e chromeExperiments) signatureAlgorithms(majorNum int, classical []utls.SignatureScheme) []utls.SignatureScheme {
-	if !e.usesMLDSA(majorNum) {
+	grease := majorNum >= chromeGreaseSigAlgsFrom
+	mldsa := e.usesMLDSA(majorNum)
+	if !grease && !mldsa {
 		return classical
 	}
-	out := make([]utls.SignatureScheme, 0, len(classical)+3)
-	out = append(out, sigMLDSA44, sigMLDSA65, sigMLDSA87)
+
+	out := make([]utls.SignatureScheme, 0, len(classical)+4)
+	if grease {
+		out = append(out, utls.SignatureScheme(randomGREASEValue()))
+	}
+	if mldsa {
+		out = append(out, sigMLDSA44, sigMLDSA65, sigMLDSA87)
+	}
 	return append(out, classical...)
 }
 
-// trustAnchorsExtension builds the trust_anchors extension, or returns nil if
-// the experiment is not enabled.
-func (e chromeExperiments) trustAnchorsExtension() (utls.TLSExtension, error) {
-	if !e.trustAnchorsSet {
+// randomGREASEValue returns one of the 16 GREASE codepoints from RFC 8701.
+//
+// uTLS substitutes its GREASE_PLACEHOLDER for cipher suites, extensions,
+// supported_groups, key_share, and supported_versions, but has no case for
+// signature_algorithms, so a placeholder left there would go out on the wire
+// verbatim as 0x0a0a on every connection. Real Chrome derives a fresh value per
+// connection (0x6a6a and 0x2a2a on consecutive hellos in the 152 capture), and
+// the spec function runs per connection, so picking here reproduces that.
+func randomGREASEValue() uint16 {
+	v := uint16(rand.IntN(16)) << 4
+	return v<<8 | v | 0x0a0a
+}
+
+// trustAnchorsExtension builds the trust_anchors extension for a Chrome major
+// version, or returns nil when that version does not send one.
+func (e chromeExperiments) trustAnchorsExtension(majorNum int) (utls.TLSExtension, error) {
+	if !e.usesTrustAnchors(majorNum) {
 		return nil, nil
 	}
-	return buildTrustAnchorsExtension(e.trustAnchors)
+	return buildTrustAnchorsExtension(e.trustAnchorIDs())
 }
 
 // buildTrustAnchorsExtension encodes a RequestedTrustAnchorList for the
