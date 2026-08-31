@@ -21,6 +21,7 @@ type peetResponse struct {
 		JA3Hash              string   `json:"ja3_hash"`
 		JA4                  string   `json:"ja4"`
 		JA4R                 string   `json:"ja4_r"`
+		Peetprint            string   `json:"peetprint"`
 		PeetprintHash        string   `json:"peetprint_hash"`
 	} `json:"tls"`
 	HTTP2 struct {
@@ -117,49 +118,75 @@ func pseudoOrder(headers []string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Chrome 151 desktop
+// Chrome desktop
 // ---------------------------------------------------------------------------
 
-func TestPresetChrome151Mac(t *testing.T) {
+// TestPresetChromeDesktopLive checks Chrome 151 and 152 against real Chrome.
+//
+// Both send the Chrome 150+ shape, whose signature_algorithms lead with the
+// ML-DSA schemes. The expected values come from a ClientHello captured off the
+// wire from Chrome 151.0.7922.174 on macOS (2026-08-30):
+//
+//	peetprint GREASE-772-771|2-1.1|GREASE-4588-29-23-24|
+//	          2308-2309-2310-1027-2052-1025-1283-2053-1281-2054-1537|1|2|
+//	          GREASE-4865-...-53|0-10-11-13-16-17613-18-23-27-35-43-45-5-51-65037-65281-GREASE-GREASE
+//
+// The offline equivalent, which pins the same JA4 without the network, is
+// TestChromeModernFingerprint.
+func TestPresetChromeDesktopLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
 
-	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac")
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	defer c.Close()
+	// md5 of the peetprint string above; the pre-150 value was
+	// 1d4ffe9b0e34acac0bd883fa7f79d7b5, which differs only in the
+	// signature_algorithms field.
+	const wantPeetprint = "67c3e9111bed9e7f03d2f21d6d88994b"
 
-	pr := fetchPeet(t, c)
+	for _, version := range []string{"151.0.0.0", "152.0.0.0"} {
+		t.Run(version, func(t *testing.T) {
+			c, err := NewClientWithPreset("chrome", version, "mac")
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			defer c.Close()
 
-	// TLS: must match real Chrome 151 peetprint and JA4
-	if pr.TLS.PeetprintHash != "1d4ffe9b0e34acac0bd883fa7f79d7b5" {
-		t.Errorf("peetprint_hash = %q, want 1d4ffe9b0e34acac0bd883fa7f79d7b5", pr.TLS.PeetprintHash)
-	}
-	if pr.TLS.JA4 != "t13d1516h2_8daaf6152771_d8a2da3f94cd" {
-		t.Errorf("ja4 = %q, want t13d1516h2_8daaf6152771_d8a2da3f94cd", pr.TLS.JA4)
-	}
+			pr := fetchPeet(t, c)
 
-	// HTTP/2: Chrome SETTINGS + m,a,s,p + priority
-	verifyH2(t, pr,
-		"1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
-		"m,a,s,p",
-		true,
-	)
+			// TLS: must match real Chrome peetprint, JA4, and JA3N
+			if pr.TLS.PeetprintHash != wantPeetprint {
+				t.Errorf("peetprint_hash = %q, want %q\n  got peetprint: %s",
+					pr.TLS.PeetprintHash, wantPeetprint, pr.TLS.Peetprint)
+			}
+			if pr.TLS.JA4 != chromeJA4From150 {
+				t.Errorf("ja4 = %q, want %q", pr.TLS.JA4, chromeJA4From150)
+			}
+			norm, gotJA3N := ja3n(pr.TLS.JA3)
+			if gotJA3N != chromeJA3NHash {
+				t.Errorf("ja3n = %q, want %q\n  normalized: %s", gotJA3N, chromeJA3NHash, norm)
+			}
 
-	// Headers
-	if c.Info.SecChUA == "" {
-		t.Error("SecChUA should be set for Chrome")
-	}
-	if c.Info.SecChUAMobile != "?0" {
-		t.Errorf("SecChUAMobile = %q, want ?0", c.Info.SecChUAMobile)
-	}
+			// HTTP/2: Chrome SETTINGS + m,a,s,p + priority
+			verifyH2(t, pr,
+				"1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p",
+				"m,a,s,p",
+				true,
+			)
 
-	t.Logf("JA3 Hash: %s", pr.TLS.JA3Hash)
-	t.Logf("JA4: %s", pr.TLS.JA4)
-	t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
-	t.Logf("Akamai Hash: %s", pr.HTTP2.AkamaiFingerprintHash)
+			// Headers
+			if c.Info.SecChUA == "" {
+				t.Error("SecChUA should be set for Chrome")
+			}
+			if c.Info.SecChUAMobile != "?0" {
+				t.Errorf("SecChUAMobile = %q, want ?0", c.Info.SecChUAMobile)
+			}
+
+			t.Logf("JA3 Hash: %s", pr.TLS.JA3Hash)
+			t.Logf("JA4: %s", pr.TLS.JA4)
+			t.Logf("Akamai: %s", pr.HTTP2.AkamaiFingerprint)
+			t.Logf("Akamai Hash: %s", pr.HTTP2.AkamaiFingerprintHash)
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -179,9 +206,11 @@ func TestPresetChromeMobileAndroid(t *testing.T) {
 
 	pr := fetchPeet(t, c)
 
-	// Same TLS as desktop Chrome
-	if pr.TLS.PeetprintHash != "1d4ffe9b0e34acac0bd883fa7f79d7b5" {
-		t.Errorf("peetprint_hash = %q, want 1d4ffe9b0e34acac0bd883fa7f79d7b5", pr.TLS.PeetprintHash)
+	// Same TLS as desktop Chrome, including the Chrome 150+ ML-DSA algorithms:
+	// the Chrome Enterprise notes list Android among the platforms that got them.
+	if pr.TLS.PeetprintHash != "67c3e9111bed9e7f03d2f21d6d88994b" {
+		t.Errorf("peetprint_hash = %q, want 67c3e9111bed9e7f03d2f21d6d88994b\n  got peetprint: %s",
+			pr.TLS.PeetprintHash, pr.TLS.Peetprint)
 	}
 
 	// Same HTTP/2 as desktop Chrome
@@ -367,13 +396,14 @@ func TestChromeTrustAnchorsWithIDsLive(t *testing.T) {
 }
 
 // TestChromeMLDSALive confirms the ML-DSA signature schemes appear ahead of the
-// classical algorithms, matching Chrome 151 Dev captures.
+// classical algorithms with no option set at all: real Chrome sends them by
+// default from version 150 on.
 func TestChromeMLDSALive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
 
-	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithMLDSA())
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac")
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -389,13 +419,14 @@ func TestChromeMLDSALive(t *testing.T) {
 	t.Logf("JA4_r: %s", pr.TLS.JA4R)
 }
 
-// TestChromeBothExperimentsLive matches the full Chrome 151 Dev shape.
+// TestChromeBothExperimentsLive matches a Chrome build that has the trust
+// anchors trial active on top of the default 150+ ML-DSA algorithms.
 func TestChromeBothExperimentsLive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
 	}
 
-	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithTrustAnchors(), WithMLDSA())
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithTrustAnchors())
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -415,6 +446,29 @@ func TestChromeBothExperimentsLive(t *testing.T) {
 
 	t.Logf("JA4:   %s", pr.TLS.JA4)
 	t.Logf("JA4_r: %s", pr.TLS.JA4R)
+}
+
+// TestChromeWithoutMLDSALive reproduces the pre-150 Chrome shape, which is what
+// a capture from Chrome 132-149 looks like.
+func TestChromeWithoutMLDSALive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	c, err := NewClientWithPreset("chrome", "151.0.0.0", "mac", WithoutMLDSA())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer c.Close()
+
+	pr := fetchPeet(t, c)
+
+	if pr.TLS.JA4 != chromeJA4Pre150 {
+		t.Errorf("ja4 = %q, want %q", pr.TLS.JA4, chromeJA4Pre150)
+	}
+	if strings.Contains(pr.TLS.JA4R, "0904") {
+		t.Errorf("ja4_r still advertises ML-DSA: %s", pr.TLS.JA4R)
+	}
 }
 
 // ---------------------------------------------------------------------------

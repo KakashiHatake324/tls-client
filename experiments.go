@@ -13,31 +13,58 @@ import (
 const extensionTrustAnchors uint16 = 0xca34
 
 // ML-DSA signature schemes from draft-ietf-tls-mldsa. Chrome advertises these
-// ahead of the classical algorithms when the post-quantum signature experiment
-// is active. uTLS 1.8.2 has no named constants for them yet.
+// ahead of the classical algorithms. uTLS 1.8.2 has no named constants for them.
 const (
 	sigMLDSA44 utls.SignatureScheme = 0x0904
 	sigMLDSA65 utls.SignatureScheme = 0x0905
 	sigMLDSA87 utls.SignatureScheme = 0x0906
 )
 
-// chromeExperiments holds opt-in ClientHello features that current Chrome
-// gates behind Finch field trials. They are off by default because the
-// majority of real Chrome stable traffic does not carry them.
+// chromeMLDSAFrom is the first Chrome major version that advertises the ML-DSA
+// signature schemes by default, ahead of the classical algorithms.
+//
+// Chrome 150 turned this on for stable across Android, ChromeOS, Linux, macOS,
+// Windows, and Fuchsia ("Support for ML-DSA in TLS enabled by default", Chrome
+// Enterprise release notes). The advertisement is unconditional: Chrome offers
+// the schemes in every ClientHello even though an ML-DSA certificate can only
+// be used when a trusted ML-DSA root is configured manually.
+//
+// Verified against a live capture of Chrome 151.0.7922.174 on macOS (headed and
+// headless, 2026-08-30), whose signature_algorithms list is
+// 2308-2309-2310-1027-2052-1025-1283-2053-1281-2054-1537.
+//
+// This changes JA4_c and the peetprint but NOT JA3 or JA3N, which do not encode
+// signature algorithms at all — which is exactly why a JA3N-only check keeps
+// passing while the client no longer matches Chrome.
+const chromeMLDSAFrom = 150
+
+// chromeExperiments holds ClientHello features whose presence depends on the
+// Chrome version or on a Finch field trial, together with any caller override.
 type chromeExperiments struct {
 	trustAnchors    []string
 	trustAnchorsSet bool
 	mldsa           bool
+	mldsaSet        bool
 }
 
 func (e chromeExperiments) any() bool {
-	return e.trustAnchorsSet || e.mldsa
+	return e.trustAnchorsSet || e.mldsaSet
+}
+
+// usesMLDSA reports whether a Chrome build of this major version advertises the
+// ML-DSA schemes. An explicit WithMLDSA/WithoutMLDSA overrides the version
+// default, which is what a caller reproducing a pre-150 capture wants.
+func (e chromeExperiments) usesMLDSA(majorNum int) bool {
+	if e.mldsaSet {
+		return e.mldsa
+	}
+	return majorNum >= chromeMLDSAFrom
 }
 
 // signatureAlgorithms returns the signature_algorithms list for a Chromium
-// spec, prepending the ML-DSA schemes when the experiment is enabled.
-func (e chromeExperiments) signatureAlgorithms(classical []utls.SignatureScheme) []utls.SignatureScheme {
-	if !e.mldsa {
+// spec, prepending the ML-DSA schemes for the versions that send them.
+func (e chromeExperiments) signatureAlgorithms(majorNum int, classical []utls.SignatureScheme) []utls.SignatureScheme {
+	if !e.usesMLDSA(majorNum) {
 		return classical
 	}
 	out := make([]utls.SignatureScheme, 0, len(classical)+3)

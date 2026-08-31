@@ -100,10 +100,10 @@ func WithBypassCache() Option {
 // draft-ietf-tls-trust-anchor-ids) to the ClientHello. Chromium presets only.
 //
 // Chrome 141+ can send this extension, but it is gated behind the
-// TLSTrustAnchorIDs Finch experiment and is currently off for most stable
-// desktop builds, so it is opt-in here. Enabling it moves the JA4 prefix from
-// t13d1516h2 (16 extensions) to t13d1517h2 (17), matching Chrome builds that
-// have the experiment active.
+// TLSTrustAnchorIDs Finch experiment, so it is opt-in here. A captured Chromium
+// 145.0.7568.0 build does send it (empty list); stable Chrome 151.0.7922.174
+// does not. Enabling it moves the JA4 prefix from t13d1516h2 (16 extensions) to
+// t13d1517h2 (17), matching the builds that have the experiment active.
 //
 // Call with no arguments to send an empty list, which is what Chrome sends on
 // an initial connection with no server-advertised IDs to intersect against.
@@ -115,14 +115,55 @@ func WithTrustAnchors(ids ...string) Option {
 	}
 }
 
-// WithMLDSA advertises the post-quantum ML-DSA signature schemes mldsa44
-// (0x0904), mldsa65 (0x0905), and mldsa87 (0x0906) ahead of the classical
+// WithMLDSA forces the post-quantum ML-DSA signature schemes mldsa44 (0x0904),
+// mldsa65 (0x0905), and mldsa87 (0x0906) to be advertised ahead of the classical
 // algorithms in signature_algorithms. Chromium presets only.
 //
-// Chrome 151 sends these in Dev builds behind an experiment; stable does not
-// send them by default, so this is opt-in. Enabling it changes the JA4_c hash.
+// You do not need this for a current Chrome: real Chrome sends these by default
+// from version 150 on, so the presets already include them for 150+. Use it only
+// to add them to an older version, and WithoutMLDSA to take them off a newer one.
 func WithMLDSA() Option {
-	return func(c *Client) { c.experiments.mldsa = true }
+	return func(c *Client) {
+		c.experiments.mldsa = true
+		c.experiments.mldsaSet = true
+	}
+}
+
+// WithoutMLDSA removes the ML-DSA signature schemes from a Chromium preset that
+// would otherwise send them (version 150 and up), reproducing the pre-150
+// signature_algorithms list. This moves JA4_c from 806a8c22fdea back to
+// d8a2da3f94cd. Chromium presets only.
+func WithoutMLDSA() Option {
+	return func(c *Client) {
+		c.experiments.mldsa = false
+		c.experiments.mldsaSet = true
+	}
+}
+
+// WithGoogleHeaders attaches the headers real Chrome sends only to Google
+// origins — x-browser-channel, x-browser-year, x-browser-copyright, and
+// optionally x-browser-validation and x-client-data — to requests whose host is
+// a Google property, over HTTPS only. Requests to every other host are
+// untouched, which is what Chrome does; leaking these to a non-Google server
+// would be a giveaway in itself.
+//
+// Chromium presets only, and no-op in JA3 mode, which carries no browser
+// identity to derive a User-Agent from.
+//
+//	client, _ := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac",
+//	    tlsclient.WithGoogleHeaders(tlsclient.GoogleHeaders{
+//	        ClientData: "CM6XywE=",                    // captured, or ClientDataHeader(...)
+//	        Validation: "S7hKo5PWMhrUgzQMwm5wWB2agsI=", // captured; see BrowserValidation
+//	    }))
+//
+// Both value-bearing headers are opt-in because neither can be derived
+// correctly from scratch: x-client-data depends on the browser's variations
+// seed, and x-browser-validation on a key baked into the Chrome binary. Left
+// empty they are simply omitted, and only the three constant headers are sent.
+func WithGoogleHeaders(g GoogleHeaders) Option {
+	return func(c *Client) {
+		c.googleHeaders = &g
+	}
 }
 
 // WithPinnedCerts enables SSL pinning using base64-encoded SHA-256 hashes of
@@ -167,20 +208,21 @@ type Client struct {
 	transport  *http.Transport
 	Info       ClientInfo
 
-	timeout      time.Duration
-	dialTimeout  time.Duration
-	proxyURL     string
-	insecure     bool
-	forceTLS12   bool
-	pins         []string // base64-encoded SHA-256 SPKI hashes for SSL pinning
-	bypassCache  bool
-	h2Browser    string
-	osVersion    string
-	experiments  chromeExperiments
-	jar          http.CookieJar
-	jarSet       bool // true if user explicitly set jar (even to nil)
-	noRedirects  bool
-	maxRedirects int
+	timeout       time.Duration
+	dialTimeout   time.Duration
+	proxyURL      string
+	insecure      bool
+	forceTLS12    bool
+	pins          []string // base64-encoded SHA-256 SPKI hashes for SSL pinning
+	bypassCache   bool
+	h2Browser     string
+	osVersion     string
+	googleHeaders *GoogleHeaders
+	experiments   chromeExperiments
+	jar           http.CookieJar
+	jarSet        bool // true if user explicitly set jar (even to nil)
+	noRedirects   bool
+	maxRedirects  int
 }
 
 // NewClientWithPreset creates a Client that mimics a specific browser version.

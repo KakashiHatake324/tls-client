@@ -23,6 +23,10 @@ type browserTransport struct {
 	pseudoHeaderOrder []string
 	defaultHeaders    http.Header
 	bypassCache       bool
+
+	// googleHeaders, when set, adds Chrome's Google-only headers to requests
+	// bound for a Google property. See google_headers.go.
+	googleHeaders *GoogleHeaders
 }
 
 func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -39,6 +43,8 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	h := req.Header
 
 	h[http.PHeaderOrderKey] = t.pseudoHeaderOrder
+
+	t.applyGoogleHeaders(req)
 
 	for key, values := range t.defaultHeaders {
 		if existing := h.Get(key); existing != "" {
@@ -72,6 +78,29 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	lowercaseHeaderKeys(h)
 
 	return t.base.RoundTrip(req)
+}
+
+// applyGoogleHeaders adds Chrome's Google-only headers when the request is
+// bound for a Google property over HTTPS, matching where real Chrome sends
+// them. Headers the caller set explicitly are left alone.
+func (t *browserTransport) applyGoogleHeaders(req *http.Request) {
+	if t.googleHeaders == nil || req.URL == nil {
+		return
+	}
+	if req.URL.Scheme != "https" || !IsGoogleAssociatedHost(req.URL.Host) {
+		return
+	}
+
+	ua := req.Header.Get("user-agent")
+	if ua == "" && t.defaultHeaders != nil {
+		ua = t.defaultHeaders.Get("user-agent")
+	}
+
+	for key, value := range t.googleHeaders.resolve(ua) {
+		if req.Header.Get(key) == "" {
+			req.Header.Set(key, value)
+		}
+	}
 }
 
 // lowercaseHeaderKeys moves every entry in h to a lowercase key, preserving
@@ -127,6 +156,7 @@ func buildPresetTransport(profile *browserProfile, platform Platform, opts *Clie
 		pseudoHeaderOrder: profile.h2.PseudoHeaderOrder,
 		defaultHeaders:    headers,
 		bypassCache:       opts.bypassCache,
+		googleHeaders:     opts.googleHeaders,
 	}, base, nil
 }
 

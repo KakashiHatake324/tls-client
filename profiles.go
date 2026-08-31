@@ -11,10 +11,17 @@ import (
 )
 
 // currentChromeMajor is the latest Chrome stable major version this package has
-// been verified against. Used as the default when no explicit version is
-// available (e.g. JA3 mode). Every version from 120 up shares the same HTTP/2
-// profile, so bumping this is documentation rather than a behavior change.
-const currentChromeMajor = 151
+// been verified against (152, stable since 2026-08-25). Used as the default
+// when no explicit version is available (e.g. JA3 mode). Every version from 120
+// up shares the same HTTP/2 profile, so bumping this is documentation rather
+// than a behavior change.
+const currentChromeMajor = 152
+
+// chromiumModernSpecFrom is the first Chromium major version that sends the
+// current ClientHello shape: MLKEM768 key share, ALPS codepoint 17613, GREASE
+// ECH, brotli certificate compression. Everything from here up to and including
+// currentChromeMajor shares one spec; see chrome133TLSSpec.
+const chromiumModernSpecFrom = 132
 
 // Platform represents the OS the browser is running on.
 type Platform string
@@ -79,7 +86,7 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 		h2 = chromiumH2Profile(majorNum)
 	}
 
-	if majorNum < 132 && !isAppleMobile {
+	if majorNum < chromiumModernSpecFrom && !isAppleMobile {
 		id := chromiumTLSHelloID(majorNum, isAndroid)
 		if _, err := utls.UTLSIdToSpec(id); err != nil {
 			return nil, fmt.Errorf("chromium %s: unsupported TLS preset: %w", version, err)
@@ -92,11 +99,12 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 			if p == PlatformIOS || p == PlatformIPadOS {
 				return newIOSSpecFunc(currentAppleMajor), nil
 			}
-			if majorNum >= 132 {
-				return newChrome133SpecFunc(exp)
+			if majorNum >= chromiumModernSpecFrom {
+				return newChrome133SpecFunc(majorNum, exp)
 			}
 			if exp.any() {
-				return nil, fmt.Errorf("chromium %s: WithTrustAnchors/WithMLDSA require version 132 or newer", version)
+				return nil, fmt.Errorf("chromium %s: WithTrustAnchors/WithMLDSA/WithoutMLDSA require version %d or newer",
+					version, chromiumModernSpecFrom)
 			}
 			id := chromiumTLSHelloID(majorNum, isAndroid)
 			return newSpecFunc(id), nil
@@ -115,11 +123,17 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 //	131 desktop: Kyber replaced by MLKEM768 (4588), ALPS 17513
 //	131 Android: still 29-23-24 (no MLKEM768), ALPS 17513
 //	132+ all platforms: MLKEM768 (4588), new ALPS 17613, identical desktop/Android
-//	141+: trust_anchors (0xca34) available behind a Finch trial, off for most
-//	      stable builds; opt in with WithTrustAnchors
-//	151+: ML-DSA signature schemes in Dev behind a trial; opt in with WithMLDSA
+//	141+: trust_anchors (0xca34) available behind a Finch trial; a Chromium
+//	      145.0.7568.0 build does send it, stable Chrome 151 does not, so it
+//	      stays opt-in through WithTrustAnchors
+//	150+: ML-DSA signature schemes advertised BY DEFAULT, ahead of the classical
+//	      algorithms. See chromeMLDSAFrom; override with WithoutMLDSA.
+//	152: no further ClientHello change found. The new PreferSlowKEXAlgorithms
+//	     and PreferSlowCiphers enterprise policies only reorder algorithms when
+//	     an administrator sets them, so the default hello is unaffected.
 //
-// The core shape has been stable since 132, so 132 through 151+ share one spec.
+// The extension and cipher lists have been stable since 132, so 132 through 152
+// share one spec; only signature_algorithms varies, at the 150 boundary.
 func chromiumTLSHelloID(v int, isAndroid bool) utls.ClientHelloID {
 	switch {
 	case v < 102:
@@ -141,12 +155,12 @@ func chromiumTLSHelloID(v int, isAndroid bool) utls.ClientHelloID {
 			return utls.HelloChrome_120
 		}
 		return utls.HelloChrome_120_PQ
-	case v < 132:
+	case v < chromiumModernSpecFrom:
 		if isAndroid {
 			return utls.HelloChrome_120
 		}
 		return utls.HelloChrome_131
-	default: // 132+
+	default: // 132 through 152
 		return utls.HelloChrome_133
 	}
 }
@@ -653,20 +667,33 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 // Custom Chrome 132+ TLS spec (desktop + Android, identical)
 // =====================================================================
 
-// chrome133TLSSpec matches real Chrome 132-151+ on desktop and Android.
+// chrome133TLSSpec matches real Chrome 132 through 152 on desktop and Android.
 // MLKEM768 (4588), new ALPS (17613), ECH, brotli compression, extension shuffling.
-// Verified against live capture: JA4 t13d1516h2_8daaf6152771_d8a2da3f94cd,
-// which is also what uTLS HelloChrome_Auto emits.
 //
-// JA3N: 771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,
+// The cipher list, extension set, and supported_groups are identical across that
+// whole range, so every version shares one JA3N:
 //
+//	771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,
 //	0-5-10-11-13-16-18-23-27-35-43-45-51-17613-65037-65281,4588-29-23-24,0
+//	JA3N hash: 8e19337e7524d2573be54efb2b0784c9
 //
-// Chrome 141+ can additionally send trust_anchors (0xca34) and Chrome 151 Dev
-// can send ML-DSA signature schemes, both behind Finch experiments that are
-// off for most stable builds. They are opt-in via exp; see WithTrustAnchors
-// and WithMLDSA.
-func chrome133TLSSpec(exp chromeExperiments) (*utls.ClientHelloSpec, error) {
+// signature_algorithms is the one part that moves, at Chrome 150, which splits
+// the range into two JA4s:
+//
+//	132-149: t13d1516h2_8daaf6152771_d8a2da3f94cd  peetprint 1d4ffe9b0e34acac0bd883fa7f79d7b5
+//	150+:    t13d1516h2_8daaf6152771_806a8c22fdea  peetprint 67c3e9111bed9e7f03d2f21d6d88994b
+//
+// The 150+ values come from a live capture of Chrome 151.0.7922.174 on macOS
+// (2026-08-30, identical headed and headless). Note that JA3 and JA3N cannot see
+// this change at all — they do not encode signature algorithms — so a JA3N-only
+// check reports a match for a client that no longer looks like Chrome.
+//
+// uTLS HelloChrome_Auto still emits the pre-150 shape, so it is no longer a
+// current-Chrome fingerprint on its own.
+//
+// Chrome 141+ can additionally send trust_anchors (0xca34) behind a Finch trial.
+// Stable Chrome 151 does not send it, so it stays opt-in via WithTrustAnchors.
+func chrome133TLSSpec(majorNum int, exp chromeExperiments) (*utls.ClientHelloSpec, error) {
 	trustAnchors, err := exp.trustAnchorsExtension()
 	if err != nil {
 		return nil, err
@@ -689,7 +716,7 @@ func chrome133TLSSpec(exp chromeExperiments) (*utls.ClientHelloSpec, error) {
 		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
 		&utls.StatusRequestExtension{},
 		&utls.SignatureAlgorithmsExtension{
-			SupportedSignatureAlgorithms: exp.signatureAlgorithms([]utls.SignatureScheme{
+			SupportedSignatureAlgorithms: exp.signatureAlgorithms(majorNum, []utls.SignatureScheme{
 				utls.ECDSAWithP256AndSHA256,
 				utls.PSSWithSHA256,
 				utls.PKCS1WithSHA256,
@@ -750,14 +777,14 @@ func chrome133TLSSpec(exp chromeExperiments) (*utls.ClientHelloSpec, error) {
 	}, nil
 }
 
-func newChrome133SpecFunc(exp chromeExperiments) (func() *utls.ClientHelloSpec, error) {
+func newChrome133SpecFunc(majorNum int, exp chromeExperiments) (func() *utls.ClientHelloSpec, error) {
 	// Build once up front so a malformed trust anchor ID surfaces as a client
 	// construction error rather than a silent fallback at handshake time.
-	if _, err := chrome133TLSSpec(exp); err != nil {
+	if _, err := chrome133TLSSpec(majorNum, exp); err != nil {
 		return nil, err
 	}
 	return func() *utls.ClientHelloSpec {
-		spec, err := chrome133TLSSpec(exp)
+		spec, err := chrome133TLSSpec(majorNum, exp)
 		if err != nil {
 			return nil
 		}

@@ -24,15 +24,15 @@ import (
     http "github.com/saucesteals/fhttp"
 )
 
-client, err := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
+client, err := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac")
 if err != nil {
     log.Fatal(err)
 }
 defer client.Close()
 
 // client.Info has the matching headers
-fmt.Println(client.Info.UserAgent)      // Mozilla/5.0 ... Chrome/151.0.0.0 ...
-fmt.Println(client.Info.SecChUA)        // "Not=A?Brand";v="99", "Google Chrome";v="151", ...
+fmt.Println(client.Info.UserAgent)      // Mozilla/5.0 ... Chrome/152.0.0.0 ...
+fmt.Println(client.Info.SecChUA)        // "Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"
 fmt.Println(client.Info.SecChUAPlatform) // "macOS"
 
 resp, err := client.Get("https://tls.peet.ws/api/all")
@@ -56,8 +56,8 @@ client, err := tlsclient.NewClientWithJA3(firefoxJA3, tlsclient.WithH2Profile("f
 
 ```go
 pool := []tlsclient.BrowserSpec{
-    {Browser: "chrome", Version: "151.0.0.0", Platform: "mac"},
-    {Browser: "chrome", Version: "151.0.0.0", Platform: "android"},
+    {Browser: "chrome", Version: "152.0.0.0", Platform: "mac"},
+    {Browser: "chrome", Version: "152.0.0.0", Platform: "android"},
     {Browser: "firefox", Version: "134.0", Platform: "win"},
     {Browser: "safari", Version: "18.3", Platform: "ios"},
 }
@@ -69,7 +69,7 @@ fmt.Println(client.Info.Browser, client.Info.Platform) // whichever was picked
 ### With Options
 
 ```go
-client, err := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac",
+client, err := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac",
     tlsclient.WithProxy("socks5://user:pass@127.0.0.1:1080"),
     tlsclient.WithTimeout(15 * time.Second),
     tlsclient.WithDialTimeout(5 * time.Second),
@@ -82,7 +82,7 @@ client, err := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac",
 The client ships with verb helpers that handle body encoding, header ordering, and response decompression (gzip / br / deflate) automatically. Use them anywhere in any repo as a drop-in HTTP layer.
 
 ```go
-client, _ := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
+client, _ := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac")
 
 resp, err := client.Get("https://api.example.com/v1/users")
 if err != nil {
@@ -229,6 +229,8 @@ Version-dependent behavior worth knowing about:
 
 | Preset | Boundary | Effect |
 |---|---|---|
+| chrome/edge/brave | 132+ | One ClientHello for every desktop and Android platform: `X25519MLKEM768` (4588), ALPS codepoint 17613, GREASE ECH, brotli certificate compression. Ciphers, extensions, and groups are unchanged through Chrome 152. |
+| chrome/edge/brave | 150+ | Advertises the post-quantum ML-DSA signature schemes mldsa44/65/87 ahead of the classical algorithms. Chrome 150 turned this on for stable. Changes JA4_c and peetprint; JA3 and JA3N cannot see it. Override with `WithoutMLDSA()`. |
 | firefox | 132+ desktop | Offers the hybrid post-quantum group `X25519MLKEM768` (4588). Not sent on Android, matching real Firefox. |
 | firefox | 151+ | Drops the ECDSA-CBC cipher 49161, taking the list from 17 suites to 16. |
 | safari | 26+ | Offers `X25519MLKEM768` on macOS, iOS, and iPadOS, which Apple enabled by default across the 26 releases. |
@@ -242,15 +244,15 @@ always use the current Apple shape, including the post-quantum group.
 
 ```go
 // Desktop
-tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
+tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac")
 tlsclient.NewClientWithPreset("firefox", "151.0", "win")
 tlsclient.NewClientWithPreset("safari", "18.3", "mac")
-tlsclient.NewClientWithPreset("edge", "151.0.0.0", "win")
+tlsclient.NewClientWithPreset("edge", "152.0.0.0", "win")
 
 // Mobile
-tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "android")
-tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "ios")
-tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "ipados")
+tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "android")
+tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "ios")
+tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "ipados")
 tlsclient.NewClientWithPreset("firefox", "151.0", "android")
 tlsclient.NewClientWithPreset("safari", "18.3", "ios")
 tlsclient.NewClientWithPreset("safari", "18.3", "ipados")
@@ -295,38 +297,142 @@ tlsclient.NewClientWithPreset("okhttp", "5.3.0", "android")
 | `WithForceTLS12()` | false | Pin TLS 1.2 handshake |
 | `WithBypassCache()` | false | Randomize host casing per request |
 | `WithPinnedCerts(pins...)` | none | SPKI SHA-256 SSL pins |
-| `WithTrustAnchors(ids...)` | off | Send `trust_anchors` (0xca34), Chrome 141+ experiment |
-| `WithMLDSA()` | off | Advertise ML-DSA signature schemes, Chrome 151 experiment |
+| `WithTrustAnchors(ids...)` | off | Send `trust_anchors` (0xca34), Chrome 141+ Finch experiment |
+| `WithMLDSA()` | auto | Force ML-DSA signature schemes on (already the default for Chrome 150+) |
+| `WithoutMLDSA()` | auto | Force ML-DSA off, reproducing the pre-Chrome-150 shape |
+| `WithGoogleHeaders(g)` | off | Send `x-client-data` and the `x-browser-*` headers to Google origins |
 
-#### Chrome Experiment Options
+#### Chrome ClientHello Options
 
-Current Chrome gates two ClientHello features behind Finch field trials, so
-they are **off by default** — most real Chrome stable traffic does not send
-them, and enabling them unconditionally would make you match a minority of
-users.
+`WithMLDSA()` / `WithoutMLDSA()` control the post-quantum ML-DSA schemes mldsa44
+(`0x0904`), mldsa65 (`0x0905`), and mldsa87 (`0x0906`) at the front of
+`signature_algorithms`.
 
-`WithTrustAnchors()` adds the `trust_anchors` extension from
-[draft-ietf-tls-trust-anchor-ids](https://tlswg.org/tls-trust-anchor-ids/draft-ietf-tls-trust-anchor-ids.html).
-Chrome 141+ can send it, but as of Chrome 151 it is disabled for most stable
-desktop builds. Enabling it moves the JA4 prefix from `t13d1516h2` (16
-extensions) to `t13d1517h2` (17):
+**You normally need neither.** Chrome 150 shipped "Support for ML-DSA in TLS
+enabled by default" to stable on Android, ChromeOS, Linux, macOS, Windows, and
+Fuchsia, so the presets send them automatically from 150 up and omit them below.
+Chrome advertises the schemes on every connection even though an ML-DSA
+certificate only validates against a manually configured root.
+
+```go
+// Chrome 151/152 — ML-DSA included automatically.
+client, _ := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac")
+
+// Reproduce a pre-150 capture from a modern version.
+client, _ = tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac",
+    tlsclient.WithoutMLDSA())
+
+// Add the schemes to an older version.
+client, _ = tlsclient.NewClientWithPreset("chrome", "145.0.0.0", "mac",
+    tlsclient.WithMLDSA())
+```
+
+This is worth understanding because **JA3 and JA3N do not encode signature
+algorithms**. A client stuck on the pre-150 list still reports a perfect JA3N
+match against Chrome while its JA4_c and peetprint are both wrong:
+
+| | Chrome 132-149 | Chrome 150+ |
+|---|---|---|
+| JA3N | `8e19337e7524d2573be54efb2b0784c9` | `8e19337e7524d2573be54efb2b0784c9` (same) |
+| JA4 | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `t13d1516h2_8daaf6152771_806a8c22fdea` |
+| peetprint | `1d4ffe9b0e34acac0bd883fa7f79d7b5` | `67c3e9111bed9e7f03d2f21d6d88994b` |
+
+#### Google-only headers: `x-client-data` and `x-browser-*`
+
+Chrome sends five extra headers to Google-owned origins and to nowhere else.
+`WithGoogleHeaders` reproduces that, attaching them only to Google-associated
+hosts over HTTPS — sending them to an unrelated server would be a giveaway on
+its own, so the scope matters as much as the values.
+
+```go
+client, _ := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac",
+    tlsclient.WithGoogleHeaders(tlsclient.GoogleHeaders{
+        ClientData: "CM6XywE=",                     // captured from a real Chrome
+        Validation: "S7hKo5PWMhrUgzQMwm5wWB2agsI=", // captured from a real Chrome
+    }))
+```
+
+Captured from Chrome 151.0.7922.174 loading `https://www.google.com/`, the set
+looks like this — note the copyright wording is "All Rights Reserved.", not the
+lowercase form quoted in most write-ups:
+
+```
+x-browser-channel: stable
+x-browser-year: 2026
+x-browser-validation: S7hKo5PWMhrUgzQMwm5wWB2agsI=
+x-browser-copyright: Copyright 2026 Google LLC. All Rights Reserved.
+x-client-data: CM6XywE=
+```
+
+The three constant headers are generated for you. The two value-bearing ones are
+**opt-in and omitted when empty**, because neither can be derived correctly from
+scratch:
+
+**`x-client-data`** is a base64-encoded `ClientVariations` protobuf listing the
+Finch variation IDs the browser is enrolled in — field 1 for reporting-only IDs,
+field 3 for ones that trigger server-side behavior. `ClientDataHeader` encodes
+it, and the encoder is pinned against real captures:
+
+```go
+tlsclient.ClientDataHeader([]int32{3328974}, nil) // "CM6XywE="
+```
+
+The IDs come from the browser's variations seed, so they differ per install —
+two fresh Chrome profiles produced `CM6XywE=` and `CPHsygE=` minutes apart.
+There is no universally correct value; use one you captured, or IDs you know.
+
+**`x-browser-validation`** is an integrity hash introduced in Chrome 134. It is
+widely documented as `base64(sha1(platform_api_key + user_agent))`, and
+`BrowserValidation` implements exactly that — but **that construction does not
+reproduce what Chrome 151 sends**, so treat a computed value as wrong:
+
+> Driving Chrome 151.0.7922.174 with a pinned User-Agent of
+> `Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/151.0.0.0 Safari/537.36`
+> yields `bvcR2nfcbw0bPYHPJRO+bpzN01M=`. None of the three published platform
+> keys produces that under SHA-1, HMAC-SHA1, or truncated SHA-256, in either
+> concatenation order. The value *is* UA-dependent and stable across browser
+> restarts, so the shape is plausible — but the key for current builds is not
+> the published one.
+
+A wrong integrity header is a louder signal than a missing one, so leave
+`Validation` empty unless you captured a real value for the exact build and User-Agent
+you are imitating.
+
+##### Capturing real values
+
+Chrome will hand you its own headers through netlog:
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --user-data-dir=/tmp/chrome-capture \
+  --log-net-log=/tmp/netlog.json --net-log-capture-mode=IncludeSensitive \
+  --virtual-time-budget=8000 "https://www.google.com/"
+
+grep -o '"x-[a-z-]*: [^"]*"' /tmp/netlog.json | sort -u
+```
+
+The values are tied to that browser build, its variations seed, and its
+User-Agent, so recapture when you change the version you impersonate.
+
+`WithTrustAnchors()` is a genuine opt-in. It adds the `trust_anchors` extension
+from [draft-ietf-tls-trust-anchor-ids](https://tlswg.org/tls-trust-anchor-ids/draft-ietf-tls-trust-anchor-ids.html),
+which Chrome 141+ can send behind the `TLSTrustAnchorIDs` Finch experiment. A
+captured Chromium 145.0.7568.0 build does send it with an empty list; stable
+Chrome 151.0.7922.174 does not. Enabling it moves the JA4 prefix from
+`t13d1516h2` (16 extensions) to `t13d1517h2` (17):
 
 ```go
 // Empty list — what Chrome sends on an initial connection.
-client, _ := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac",
+client, _ := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac",
     tlsclient.WithTrustAnchors())
 
 // Or advertise specific IDs, as dotted-decimal relative OIDs.
-client, _ = tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac",
+client, _ = tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac",
     tlsclient.WithTrustAnchors("32473.1", "32473.2.1"))
 ```
 
-`WithMLDSA()` prepends the post-quantum ML-DSA schemes mldsa44 (`0x0904`),
-mldsa65 (`0x0905`), and mldsa87 (`0x0906`) to `signature_algorithms`, matching
-Chrome 151 Dev builds. This changes the JA4_c hash.
-
-Both options apply to Chromium presets (`chrome`, `edge`, `brave`) on version
-132+ and are ignored by Firefox, Safari, and okhttp.
+All three apply to Chromium presets (`chrome`, `edge`, `brave`) on version 132+
+and are ignored by Firefox, Safari, and okhttp.
 
 ### Request Options
 
@@ -366,7 +472,7 @@ Passed to `Get`, `Post`, `Request`, etc. Scope is a single request.
 Cookies are handled automatically by default (like a real browser):
 
 ```go
-client, _ := tlsclient.NewClientWithPreset("chrome", "151.0.0.0", "mac")
+client, _ := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac")
 
 // Cookies from the first response are sent in subsequent requests
 client.Get("https://example.com/login")
@@ -391,6 +497,7 @@ cookies := client.Jar().Cookies(someURL)
 | User-Agent | Yes |
 | sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform | Yes (Chromium only) |
 | Cookies | Yes (auto jar) |
+| `x-client-data` / `x-browser-*` on Google origins | Opt-in (`WithGoogleHeaders`) |
 
 ### A note on JA3 stability
 
@@ -402,13 +509,46 @@ a fingerprinting tell.
 
 The stable equivalents are **JA4**, which sorts extensions, and **JA3N**, the
 normalized JA3 that sorts the extension field. Chromium presets produce JA3N
-`8e19337e7524d2573be54efb2b0784c9` and JA4
-`t13d1516h2_8daaf6152771_d8a2da3f94cd` across mac, Windows, Android, and Edge,
-since Chrome's ClientHello is platform-independent from version 132 on.
+`8e19337e7524d2573be54efb2b0784c9` on mac, Windows, Linux, Android, Edge, and
+Brave alike, for every version from 132 through 152 — Chrome's ClientHello is
+platform-independent from version 132 on. JA4 splits at the Chrome 150
+signature-algorithm change: `t13d1516h2_8daaf6152771_d8a2da3f94cd` for 132-149,
+`t13d1516h2_8daaf6152771_806a8c22fdea` for 150+.
 
-Be aware that JA4 does not encode the supported_groups list, so two clients with
-different curves — including a missing post-quantum group — can share a JA4
-while differing in JA3N and peetprint. It is worth checking both.
+`ja4_test.go` marshals the ClientHello each preset would send and recomputes
+JA3, JA3N, and JA4 from the raw bytes, so those values are pinned offline as
+well as against tls.peet.ws:
+
+```bash
+go test -short -run TestChromeModernFingerprint -v
+```
+
+**Check more than one fingerprint.** Each of these has a blind spot, and a
+preset can look perfect in one while being wrong in another:
+
+- **JA3 / JA3N** ignore signature algorithms entirely. The Chrome 150 ML-DSA
+  change is invisible to them — JA3N is byte-identical before and after.
+- **JA4** ignores `supported_groups`, so a missing post-quantum group does not
+  show up. It does cover signature algorithms, via JA4_c.
+- **peetprint** covers both, which makes it the best single check.
+
+### Verifying against a real browser
+
+The surest way to check a preset is to capture what the real browser sends. Run
+a listener that dumps the ClientHello, point the browser at it, then point this
+library at it and compare:
+
+```bash
+go run ./cmd/hellodump -addr :8443          # prints JA3, JA3N, JA4 per connection
+
+# then, in a browser: https://localhost:8443
+# and from Go: tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac") → GET https://localhost:8443
+```
+
+The certificate error the browser shows is expected and harmless: the handshake
+never completes, because the ClientHello is all that gets read. This is how the
+Chrome 150 ML-DSA change was caught — it was invisible to the JA3N check the
+test suite had at the time.
 
 ## JA3 Format
 
@@ -449,17 +589,22 @@ tls-client/
 ├── profiles.go        Browser fingerprint profiles (TLS + HTTP/2 + headers)
 ├── transport.go       Transport wrapper (header ordering, H2 config)
 ├── client_test.go     Integration tests
+├── ja4_test.go        Offline JA3/JA4 verification (no network)
 ├── ja3/
 │   ├── parser.go      JA3 string parser
 │   └── parser_test.go
-└── cmd/example/
-    └── main.go        CLI demo
+└── cmd/
+    ├── example/
+    │   └── main.go    CLI demo
+    └── hellodump/
+        └── main.go    ClientHello capture server (JA3/JA3N/JA4 off the wire)
 ```
 
 ## Tests
 
 ```bash
-# Unit tests (offline)
+# Unit tests (offline), including the JA3/JA4 fingerprint pins
+go test -short ./... -v
 go test ./ja3/ -v
 
 # Integration tests (hits tls.peet.ws)
@@ -475,7 +620,7 @@ go test -v ./... -timeout 60s
 ## CLI Demo
 
 ```bash
-go run ./cmd/example/ -browser chrome -version 151.0.0.0 -platform mac
+go run ./cmd/example/ -browser chrome -version 152.0.0.0 -platform mac
 go run ./cmd/example/ -browser firefox -version 134.0 -platform win
 go run ./cmd/example/ -browser safari -version 18.3 -platform ios
 go run ./cmd/example/ -ja3 '771,4865-4866-4867-...,4588-29-23-24,0'
