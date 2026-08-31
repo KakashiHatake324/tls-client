@@ -96,6 +96,13 @@ func newDeflateReader(r io.Reader) (io.Reader, error) {
 		return nil, err
 	}
 
+	// An empty body is a legitimately empty body, not a truncated stream:
+	// flate.NewReader would turn it into io.ErrUnexpectedEOF on first Read,
+	// which is exactly the failure the lazy wrapper exists to avoid.
+	if n == 0 {
+		return bytes.NewReader(nil), nil
+	}
+
 	replayed := io.MultiReader(bytes.NewReader(head), r)
 	if n == 2 && head[0]&0x0f == 0x08 && (uint16(head[0])<<8|uint16(head[1]))%31 == 0 {
 		if zr, zerr := zlib.NewReader(replayed); zerr == nil {

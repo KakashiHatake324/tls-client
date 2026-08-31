@@ -128,13 +128,27 @@ func TestDecompressResponseLeavesUnknownAndEmptyBodies(t *testing.T) {
 		t.Error("Content-Length was stripped from an untouched response")
 	}
 
-	// An empty gzip body must not fail until it is actually read, and even
-	// then only with the compressor's own error — never a panic.
-	empty := decompressResponse(responseWith("gzip", nil))
-	if _, err := io.ReadAll(empty.Body); err == nil {
-		t.Log("empty gzip body read cleanly")
+}
+
+// TestDecompressResponseHandlesEmptyBodies pins the lazy-decode guarantee: a
+// response that carries a Content-Encoding but no body (204, 304, an
+// END_STREAM h2 response) must read back as zero bytes, not as the
+// compressor's "unexpected EOF".
+func TestDecompressResponseHandlesEmptyBodies(t *testing.T) {
+	for _, encoding := range []string{"gzip", "br", "deflate", "zstd"} {
+		t.Run(encoding, func(t *testing.T) {
+			res := decompressResponse(responseWith(encoding, nil))
+			defer res.Body.Close()
+
+			got, err := io.ReadAll(res.Body)
+			if err != nil {
+				t.Errorf("empty %s body: err = %v, want nil", encoding, err)
+			}
+			if len(got) != 0 {
+				t.Errorf("empty %s body: read %d bytes, want 0", encoding, len(got))
+			}
+		})
 	}
-	empty.Body.Close()
 }
 
 // TestRoundTripLowercasesBeforeReadingHeaders guards the invariant the whole
@@ -167,6 +181,42 @@ func TestRoundTripLowercasesBeforeReadingHeaders(t *testing.T) {
 	}
 	if got := captured["sec-ch-ua"]; len(got) != 1 || got[0] != "profile-hint" {
 		t.Errorf("sec-ch-ua = %v, want the profile default under a lowercase key", got)
+	}
+}
+
+// TestRoundTripDecompressesTheResponse covers the wiring between RoundTrip and
+// decompressResponse. Without it, deleting that one line from RoundTrip leaves
+// the whole suite green while production reads raw compressed bytes.
+func TestRoundTripDecompressesTheResponse(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	io.WriteString(zw, payload)
+	zw.Close()
+
+	tr := &browserTransport{
+		base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			h := http.Header{}
+			h.Set("Content-Encoding", "gzip")
+			return &http.Response{Header: h, Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil
+		}),
+	}
+
+	req, _ := http.NewRequest("GET", "https://example.com/", nil)
+	res, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer res.Body.Close()
+
+	got, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(got) != payload {
+		t.Errorf("body = %q, want %q", got, payload)
+	}
+	if ce := res.Header.Get("Content-Encoding"); ce != "" {
+		t.Errorf("Content-Encoding survived RoundTrip: %q", ce)
 	}
 }
 
