@@ -1,10 +1,12 @@
 package tlsclient
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -38,6 +40,27 @@ func WithDialTimeout(d time.Duration) Option {
 	return func(c *Client) { c.dialTimeout = d }
 }
 
+// WithDialContext installs a custom dialer used for every TCP connection the
+// client opens. Use it to pin a hostname to a specific IP, route through a
+// bespoke network, or apply per-connection timeouts.
+//
+// Note the address handed to fn is whatever the transport is about to connect
+// to: on a proxied request that is the PROXY address, not the origin. A
+// hostname-rewriting dialer and WithProxy together will not do what you expect.
+//
+// When combined with WithDisableIPV6 the network argument is narrowed to
+// "tcp4" before fn is called.
+func WithDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
+	return func(c *Client) { c.dialContext = fn }
+}
+
+// WithDisableIPV6 forces every connection onto IPv4 by dialing "tcp4" instead
+// of "tcp". Useful on hosts with no IPv6 route, where a dual-stack dial to an
+// AAAA-only name would otherwise stall until it times out.
+func WithDisableIPV6() Option {
+	return func(c *Client) { c.disableIPv6 = true }
+}
+
 // WithH2Profile sets which browser's HTTP/2 fingerprint to use in JA3 mode.
 // Accepted values: "chrome", "firefox", "safari". Defaults to "chrome" if unset.
 // This controls SETTINGS, WINDOW_UPDATE, pseudo-header order, and priority.
@@ -59,6 +82,18 @@ func WithCookieJar(jar http.CookieJar) Option {
 		c.jar = jar
 		c.jarSet = true
 	}
+}
+
+// WithoutDefaultHeaders stops the transport from filling in the profile's
+// user-agent and sec-ch-ua* headers on requests that do not already carry
+// them. Use it when the caller builds a complete header set of its own and
+// needs the absence of a header to be meaningful — a session captured without
+// client hints, say, where injecting sec-ch-ua would contradict the capture.
+//
+// Client.Info is still populated, so the profile's identity headers remain
+// available to set explicitly.
+func WithoutDefaultHeaders() Option {
+	return func(c *Client) { c.noDefaultHeaders = true }
 }
 
 // WithNoCookieJar disables automatic cookie handling.
@@ -220,21 +255,24 @@ type Client struct {
 	transport  *http.Transport
 	Info       ClientInfo
 
-	timeout       time.Duration
-	dialTimeout   time.Duration
-	proxyURL      string
-	insecure      bool
-	forceTLS12    bool
-	pins          []string // base64-encoded SHA-256 SPKI hashes for SSL pinning
-	bypassCache   bool
-	h2Browser     string
-	osVersion     string
-	googleHeaders *GoogleHeaders
-	experiments   chromeExperiments
-	jar           http.CookieJar
-	jarSet        bool // true if user explicitly set jar (even to nil)
-	noRedirects   bool
-	maxRedirects  int
+	timeout          time.Duration
+	dialTimeout      time.Duration
+	dialContext      func(ctx context.Context, network, addr string) (net.Conn, error)
+	disableIPv6      bool
+	noDefaultHeaders bool
+	proxyURL         string
+	insecure         bool
+	forceTLS12       bool
+	pins             []string // base64-encoded SHA-256 SPKI hashes for SSL pinning
+	bypassCache      bool
+	h2Browser        string
+	osVersion        string
+	googleHeaders    *GoogleHeaders
+	experiments      chromeExperiments
+	jar              http.CookieJar
+	jarSet           bool // true if user explicitly set jar (even to nil)
+	noRedirects      bool
+	maxRedirects     int
 }
 
 // NewClientWithPreset creates a Client that mimics a specific browser version.
@@ -409,22 +447,50 @@ func (c *Client) validate() error {
 	return nil
 }
 
+// defaultMaxRedirects mirrors net/http's cap, which applies only when
+// CheckRedirect is nil. We always install one (to fold redirect-added headers),
+// so the cap has to be reproduced here.
+const defaultMaxRedirects = 10
+
 func (c *Client) redirectPolicy() func(*http.Request, []*http.Request) error {
 	if c.noRedirects {
 		return func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}
 	}
-	if c.maxRedirects > 0 {
-		max := c.maxRedirects
-		return func(_ *http.Request, via []*http.Request) error {
-			if len(via) >= max {
-				return fmt.Errorf("stopped after %d redirects", max)
-			}
-			return nil
-		}
+	max := c.maxRedirects
+	if max <= 0 {
+		max = defaultMaxRedirects
 	}
-	return nil
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= max {
+			return fmt.Errorf("stopped after %d redirects", max)
+		}
+		foldRedirectHeaders(req.Header)
+		return nil
+	}
+}
+
+// foldRedirectHeaders collapses the canonical-cased headers the redirect
+// machinery adds into the lowercase keys the rest of this package uses.
+//
+// fhttp sets "Referer" on every hop unconditionally (client.go:681). A caller
+// that already carries a lowercase "referer" — the idiomatic way to control
+// header order here — would otherwise end up with both keys, which
+// lowercaseHeaderKeys then merges into two referer headers on the wire. The
+// redirect's value is the correct one, so it replaces rather than appends.
+func foldRedirectHeaders(h http.Header) {
+	for key, values := range h {
+		if key == http.HeaderOrderKey || key == http.PHeaderOrderKey {
+			continue
+		}
+		lower := strings.ToLower(key)
+		if lower == key {
+			continue
+		}
+		h[lower] = values
+		delete(h, key)
+	}
 }
 
 func (c *Client) resolveJar() http.CookieJar {

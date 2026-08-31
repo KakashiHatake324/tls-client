@@ -383,22 +383,37 @@ The IDs come from the browser's variations seed, so they differ per install —
 two fresh Chrome profiles produced `CM6XywE=` and `CPHsygE=` minutes apart.
 There is no universally correct value; use one you captured, or IDs you know.
 
-**`x-browser-validation`** is an integrity hash introduced in Chrome 134. It is
-widely documented as `base64(sha1(platform_api_key + user_agent))`, and
-`BrowserValidation` implements exactly that — but **that construction does not
-reproduce what Chrome 151 sends**, so treat a computed value as wrong:
+**`x-browser-validation`** is an integrity hash introduced in Chrome 134. The
+algorithm is open source — `chrome/common/request_header_integrity/request_header_integrity_url_loader_throttle.cc`
+in public chromium/src, behind `enable_request_header_integrity = is_chrome_branded`:
 
-> Driving Chrome 151.0.7922.174 with a pinned User-Agent of
-> `Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/151.0.0.0 Safari/537.36`
-> yields `bvcR2nfcbw0bPYHPJRO+bpzN01M=`. None of the three published platform
-> keys produces that under SHA-1, HMAC-SHA1, or truncated SHA-256, in either
-> concatenation order. The value *is* UA-dependent and stable across browser
-> restarts, so the shape is plausible — but the key for current builds is not
-> the published one.
+```cpp
+base::Base64Encode(base::SHA1Hash(base::as_byte_span(
+    std::string(kIntegritySeed) + google_apis::GetAPIKey() +
+    embedder_support::GetUserAgent())));
+```
 
-A wrong integrity header is a louder signal than a missing one, so leave
-`Validation` empty unless you captured a real value for the exact build and User-Agent
-you are imitating.
+So it is `base64(sha1(seed + api_key + user_agent))`. `BrowserValidation(secret, ua)`
+implements exactly this, with `secret = seed + api_key`. The catch is the secret:
+
+> Both `kIntegritySeed` and the API key come from a **closed** Chromium submodule
+> (`src/chrome/common/request_header_integrity/internal`, `src/google_apis/internal`),
+> pulled only for official Google builds. The public tree sets the seed to `""`
+> and even compiles the header names as `X-Placeholder-1..4` — which is why these
+> strings live in the Google Chrome binary but not in open-source Chromium. The
+> seed was added around November 2025, before the Chrome 151 branch, which is
+> exactly why the older `sha1(api_key + ua)` formula reproduces Chrome ~134–143
+> captures but not 151's `bvcR2nfcbw0bPYHPJRO+bpzN01M=`.
+
+SHA-1 is not invertible, so a captured `(UA, value)` pair does not reveal the
+secret, and one value does not let you compute another. Unless you extract the
+secret from the matching Chrome binary and pass it as `ValidationSecret`, capture
+the real header and pass it as `Validation`. A wrong integrity header is a louder
+signal than a missing one, so leave it empty otherwise.
+
+`ChromeAPIKey(platform)` returns the public per-platform key (selected by build
+platform, not by the spoofed UA); with an empty seed it reproduces the pre-2025
+formula, useful only for older Chrome.
 
 ##### Capturing real values
 

@@ -128,20 +128,42 @@ func TestGoogleHeadersOmitsUnknownValues(t *testing.T) {
 	}
 }
 
-// TestGoogleHeadersValidationKey covers deriving the value from a key.
-func TestGoogleHeadersValidationKey(t *testing.T) {
+// TestGoogleHeadersValidationSecret covers deriving the value from a secret.
+func TestGoogleHeadersValidationSecret(t *testing.T) {
 	const ua = "Mozilla/5.0 test"
-	got := GoogleHeaders{ValidationKey: ChromeAPIKey(PlatformMac), Year: "2026"}.resolve(ua)
+	const secret = "seed" + "AIzaSyExample"
+	got := GoogleHeaders{ValidationSecret: secret, Year: "2026"}.resolve(ua)
 
-	want := BrowserValidation(ChromeAPIKey(PlatformMac), ua)
+	want := BrowserValidation(secret, ua)
 	if got["x-browser-validation"] != want {
 		t.Errorf("x-browser-validation = %q, want %q", got["x-browser-validation"], want)
 	}
 
-	// An explicit value wins over the key.
-	got = GoogleHeaders{ValidationKey: ChromeAPIKey(PlatformMac), Validation: "explicit"}.resolve(ua)
+	// An explicit value wins over the secret.
+	got = GoogleHeaders{ValidationSecret: secret, Validation: "explicit"}.resolve(ua)
 	if got["x-browser-validation"] != "explicit" {
 		t.Errorf("explicit Validation was overridden: %q", got["x-browser-validation"])
+	}
+}
+
+// TestBrowserValidationEmptySeedMatchesLegacy pins the empty-seed case: with the
+// seed "" this is the old base64(sha1(api_key + ua)) formula that reproduced
+// Chrome ~134-143. The value is a regression anchor, not a current-Chrome value.
+func TestBrowserValidationEmptySeedMatchesLegacy(t *testing.T) {
+	const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+		"(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+
+	// Empty seed + mac key, computed independently.
+	if got, want := BrowserValidation(ChromeAPIKey(PlatformMac), ua), "gaDqXtWJKNMORzYkmKfW9PCuEPo="; got != want {
+		t.Errorf("empty-seed mac = %q, want %q", got, want)
+	}
+	// The real Chrome 151 value, which the empty-seed formula must NOT produce:
+	// its seed is non-empty. This documents that the seed is the missing input.
+	const real151 = "bvcR2nfcbw0bPYHPJRO+bpzN01M="
+	for _, p := range []Platform{PlatformWindows, PlatformMac, PlatformLinux} {
+		if BrowserValidation(ChromeAPIKey(p), ua) == real151 {
+			t.Errorf("empty-seed %s unexpectedly reproduced the real 151 value; the seed assumption is wrong", p)
+		}
 	}
 }
 

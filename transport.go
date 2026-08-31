@@ -1,6 +1,7 @@
 package tlsclient
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -42,30 +43,6 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	h := req.Header
 
-	h[http.PHeaderOrderKey] = t.pseudoHeaderOrder
-
-	t.applyGoogleHeaders(req)
-
-	for key, values := range t.defaultHeaders {
-		if existing := h.Get(key); existing != "" {
-			continue
-		}
-		if len(values) > 0 {
-			h.Set(key, values[0])
-		}
-	}
-
-	if h[http.HeaderOrderKey] == nil {
-		keys := make([]string, 0, len(h))
-		for key := range h {
-			keys = append(keys, key)
-		}
-		rand.Shuffle(len(keys), func(i, j int) {
-			keys[i], keys[j] = keys[j], keys[i]
-		})
-		h[http.HeaderOrderKey] = keys
-	}
-
 	// HTTP/2 wire format uses lowercase header names, and fhttp's HTTP/2
 	// write path does case-sensitive map lookups for a handful of headers —
 	// most notably "accept-encoding" (http2/transport.go:1636). When our
@@ -75,9 +52,61 @@ func (t *browserTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// wire. Force every real header key to lowercase so the map ends up in
 	// the shape fhttp expects. Sentinel keys (header order, pseudo-header
 	// order) are left alone.
+	//
+	// This runs FIRST, before any header is read or written below, because
+	// http.Header.Get canonicalizes its argument: against a caller-built
+	// map literal with lowercase keys (the idiomatic way to control header
+	// order) every Get would miss, and the default-header injection below
+	// would append a second value under the same lowercased key.
 	lowercaseHeaderKeys(h)
 
-	return t.base.RoundTrip(req)
+	h[http.PHeaderOrderKey] = t.pseudoHeaderOrder
+
+	t.applyGoogleHeaders(req)
+
+	for key, values := range t.defaultHeaders {
+		if headerValue(h, key) != "" {
+			continue
+		}
+		if len(values) > 0 {
+			h[strings.ToLower(key)] = []string{values[0]}
+		}
+	}
+
+	lowercaseHeaderKeys(h)
+
+	// fhttp matches order entries against strings.ToLower(headerKey)
+	// (header.go headerSorter.Less), so the order list itself must be
+	// lowercase or every key falls through to lexicographic order.
+	if order, ok := h[http.HeaderOrderKey]; ok {
+		h[http.HeaderOrderKey] = lowercaseAll(order)
+	} else {
+		keys := make([]string, 0, len(h))
+		for key := range h {
+			if key == http.HeaderOrderKey || key == http.PHeaderOrderKey {
+				continue
+			}
+			keys = append(keys, key)
+		}
+		rand.Shuffle(len(keys), func(i, j int) {
+			keys[i], keys[j] = keys[j], keys[i]
+		})
+		h[http.HeaderOrderKey] = keys
+	}
+
+	res, err := t.base.RoundTrip(req)
+	if err != nil {
+		return res, err
+	}
+	return decompressResponse(res), nil
+}
+
+func lowercaseAll(in []string) []string {
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = strings.ToLower(v)
+	}
+	return out
 }
 
 // applyGoogleHeaders adds Chrome's Google-only headers when the request is
@@ -91,16 +120,34 @@ func (t *browserTransport) applyGoogleHeaders(req *http.Request) {
 		return
 	}
 
-	ua := req.Header.Get("user-agent")
+	// Keys are read and written lowercase: RoundTrip lowercases the whole
+	// map before calling this, so Header.Get (which canonicalizes) would
+	// miss every entry.
+	ua := headerValue(req.Header, "user-agent")
 	if ua == "" && t.defaultHeaders != nil {
 		ua = t.defaultHeaders.Get("user-agent")
 	}
 
 	for key, value := range t.googleHeaders.resolve(ua) {
-		if req.Header.Get(key) == "" {
+		if headerValue(req.Header, key) == "" {
 			req.Header.Set(key, value)
 		}
 	}
+}
+
+// headerValue reads a header without caring which case the key was stored
+// under. RoundTrip lowercases the whole map, but a caller-built map literal
+// reaches this package with whatever case it was written in, and
+// http.Header.Get only ever looks at the canonical form.
+func headerValue(h http.Header, key string) string {
+	lower := strings.ToLower(key)
+	if v := h[lower]; len(v) > 0 {
+		return v[0]
+	}
+	if v := h[http.CanonicalHeaderKey(key)]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
 }
 
 // lowercaseHeaderKeys moves every entry in h to a lowercase key, preserving
@@ -149,6 +196,9 @@ func buildPresetTransport(profile *browserProfile, platform Platform, opts *Clie
 	headers, err := profile.headerFn(platform)
 	if err != nil {
 		return nil, nil, err
+	}
+	if opts.noDefaultHeaders {
+		headers = nil
 	}
 
 	return &browserTransport{
@@ -211,10 +261,7 @@ func applyH2Profile(t2 *http2.Transport, p *h2Profile) {
 
 func buildBaseTransport(c *Client) *http.Transport {
 	t := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   c.dialTimeout,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           c.resolveDialContext(),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
@@ -239,6 +286,34 @@ func buildBaseTransport(c *Client) *http.Transport {
 	}
 
 	return t
+}
+
+// resolveDialContext builds the dial function for the transport, layering the
+// IPv4-only narrowing on top of whatever dialer the caller supplied.
+func (c *Client) resolveDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dial := c.dialContext
+	if dial == nil {
+		dial = (&net.Dialer{
+			Timeout:   c.dialTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext
+	}
+	if !c.disableIPv6 {
+		return dial
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dial(ctx, ipv4Only(network), addr)
+	}
+}
+
+func ipv4Only(network string) string {
+	switch network {
+	case "tcp", "tcp6":
+		return "tcp4"
+	case "udp", "udp6":
+		return "udp4"
+	}
+	return network
 }
 
 // capSpecToTLS12 wraps a spec function to force TLS 1.2 by removing TLS 1.3

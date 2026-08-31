@@ -48,14 +48,15 @@ type GoogleHeaders struct {
 
 	// Validation is the verbatim x-browser-validation value. Leave it empty to
 	// omit the header, which is the safe default; see BrowserValidation for
-	// why this library cannot compute a correct one.
+	// why this library cannot compute a correct one from scratch.
 	Validation string
 
-	// ValidationKey, when set and Validation is empty, computes the header as
-	// base64(sha1(ValidationKey + userAgent)). Read BrowserValidation before
-	// using it: with the publicly circulated keys this does NOT reproduce what
-	// current Chrome sends.
-	ValidationKey string
+	// ValidationSecret, when set and Validation is empty, computes the header as
+	// base64(sha1(ValidationSecret + userAgent)). The secret is Chrome's
+	// kIntegritySeed concatenated with its build API key (see BrowserValidation);
+	// both come from a closed Chromium submodule, so this only yields a correct
+	// value when you supply a secret extracted from the matching Chrome build.
+	ValidationSecret string
 
 	// Channel is x-browser-channel. Defaults to "stable".
 	Channel string
@@ -77,8 +78,8 @@ func (g GoogleHeaders) resolve(userAgent string) map[string]string {
 	}
 
 	validation := g.Validation
-	if validation == "" && g.ValidationKey != "" {
-		validation = BrowserValidation(g.ValidationKey, userAgent)
+	if validation == "" && g.ValidationSecret != "" {
+		validation = BrowserValidation(g.ValidationSecret, userAgent)
 	}
 
 	out := map[string]string{
@@ -95,38 +96,58 @@ func (g GoogleHeaders) resolve(userAgent string) map[string]string {
 	return out
 }
 
-// BrowserValidation computes x-browser-validation as Chrome is understood to
-// build it: base64(sha1(apiKey + userAgent)), where apiKey is a Google API key
-// compiled into the browser. The header was introduced in Chrome 134.
+// BrowserValidation computes x-browser-validation as base64(sha1(secret +
+// userAgent)). The header was introduced in Chrome 134.
 //
-// # Read this before relying on it
+// The algorithm is open source. In chrome/common/request_header_integrity/
+// request_header_integrity_url_loader_throttle.cc (public chromium/src, behind
+// enable_request_header_integrity = is_chrome_branded), AddRequestIntegrityHeaders
+// computes:
 //
-// The construction is UA-dependent and deterministic — both confirmed here by
-// experiment — but the publicly circulated per-platform keys do NOT reproduce
-// what Chrome 151 sends. Driving Chrome 151.0.7922.174 with a pinned User-Agent
-// of
+//	base::Base64Encode(base::SHA1Hash(base::as_byte_span(
+//	    std::string(kIntegritySeed) + google_apis::GetAPIKey() +
+//	    embedder_support::GetUserAgent())))
 //
-//	Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
-//	Gecko) Chrome/151.0.0.0 Safari/537.36
+// So the true secret is kIntegritySeed || GOOGLE_API_KEY, a fixed byte string
+// per Chrome build. Pass that as the secret argument and this reproduces
+// Chrome's value for any User-Agent.
 //
-// produced x-browser-validation: bvcR2nfcbw0bPYHPJRO+bpzN01M=, which none of
-// the three published keys yields under sha1, HMAC-SHA1, or truncated SHA-256
-// in either concatenation order. Either the keys have rotated or the input is
-// more than key+UA on current builds.
+// # Why you cannot compute it from scratch
 //
-// So: a computed value is very likely wrong, and a wrong integrity header is a
-// stronger signal than a missing one. Prefer capturing the real value from the
-// Chrome build you are imitating — see the netlog recipe in the README — and
-// passing it as GoogleHeaders.Validation.
-func BrowserValidation(apiKey, userAgent string) string {
-	sum := sha1.Sum([]byte(apiKey + userAgent))
+// Both halves of the secret live in a CLOSED Chromium submodule
+// (src/chrome/common/request_header_integrity/internal and
+// src/google_apis/internal), pulled only for official Google builds. The public
+// tree defines kIntegritySeed as "" and leaves the API key empty, and an
+// unbranded build even compiles the header names as X-Placeholder-1..4 — which
+// is why these strings are present in the Google Chrome binary and absent from
+// open-source Chromium.
+//
+// The seed was added around November 2025 (Chromium CL 7104818), before the
+// Chrome 151 branch. That is exactly why the older base64(sha1(api_key + ua))
+// formula still reproduces Chrome ~134–143 captures but fails on 151: the seed
+// used to be empty. With a pinned Windows UA, Chrome 151.0.7922.174 emits
+// bvcR2nfcbw0bPYHPJRO+bpzN01M=, which the empty-seed formula does not produce
+// under any published key.
+//
+// SHA-1 is not invertible, so a captured (UA, value) pair does not reveal the
+// secret, and one value does not let you compute another for a different UA.
+// Unless you extract the secret from the matching Chrome binary, capture the
+// real header instead — see the netlog recipe in the README — and pass it as
+// GoogleHeaders.Validation. A wrong integrity header is a louder tell than a
+// missing one.
+func BrowserValidation(secret, userAgent string) string {
+	sum := sha1.Sum([]byte(secret + userAgent))
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
-// ChromeAPIKey returns the publicly circulated Chrome API key for a platform,
-// for use with GoogleHeaders.ValidationKey. These keys are reverse-engineered
-// from older Chrome builds and are not verified against current Chrome; see
-// BrowserValidation.
+// ChromeAPIKey returns the publicly circulated Chrome API key for a platform.
+// GetAPIKey() selects the key by BUILD platform, not by the spoofed UA, so a
+// macOS Chrome uses the macOS key even while sending a Windows User-Agent.
+//
+// On current Chrome the key alone is not the validation secret: it is prefixed
+// by kIntegritySeed (see BrowserValidation), so these keys reproduce only
+// pre-seed captures (Chrome ~134–143). They are kept for that case and as the
+// key half of a full secret you may recover.
 func ChromeAPIKey(p Platform) string {
 	switch p {
 	case PlatformWindows:
