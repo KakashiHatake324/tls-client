@@ -11,17 +11,48 @@ import (
 )
 
 // currentChromeMajor is the latest Chrome stable major version this package has
-// been verified against (152, stable since 2026-08-25). Used as the default
-// when no explicit version is available (e.g. JA3 mode). Every version from 120
-// up shares the same HTTP/2 profile, so bumping this is documentation rather
-// than a behavior change.
-const currentChromeMajor = 152
+// been verified against (153, from a real macOS capture on 2026-09-27; 152 was
+// stable since 2026-08-25). Used as the default when no explicit version is
+// available (e.g. JA3 mode). Every version from 120 up shares the same HTTP/2
+// profile, so bumping this is documentation rather than a behavior change for H2 —
+// the ClientHello difference at 153 is carried by chromiumTLSFlagsFrom instead.
+const currentChromeMajor = 153
 
 // chromiumModernSpecFrom is the first Chromium major version that sends the
 // current ClientHello shape: MLKEM768 key share, ALPS codepoint 17613, GREASE
 // ECH, brotli certificate compression. Everything from here up to and including
 // currentChromeMajor shares one spec; see chrome133TLSSpec.
 const chromiumModernSpecFrom = 132
+
+/*
+chromiumTLSFlagsFrom is the first Chromium major observed sending extension 0x12E0.
+
+	MEASURED, NOT NAMED. A real Chrome 153 capture (macOS, 2026-09-27) sends a 20th
+	ClientHello extension this package did not emit:
+
+	    type 4832 (0x12E0), payload 3e80 — two bytes, 16000 big-endian
+
+	It is in 100 of 100 handshakes in that capture, across three hosts
+	(www.google.com, www.ticketmaster.com, ticketmaster.com), with a byte-identical
+	payload every time. So it is unconditional for that build, not a per-connection or
+	per-host value.
+
+	NOT record_size_limit, whose codepoint is 0x001C (utls fakeRecordSizeLimit) and
+	which is already absent from Chrome's list. The semantics of 0x12E0 are NOT
+	established here; it is reproduced verbatim because a constant two-byte payload
+	observed 100/100 needs no interpretation to replay.
+
+	GATED AT 153 BECAUSE 153 IS WHAT WAS MEASURED. Whether 151 and 152 also send it is
+	UNKNOWN — the captures for those majors are Charles binary sessions with no
+	readable ClientHello records, so this could equally be an extension we have been
+	omitting for longer. Do not widen the gate without a capture for the major you are
+	widening it to; if a 152 capture shows 0x12E0, lower this constant and say so.
+*/
+const chromiumTLSFlagsFrom = 153
+
+// chromiumTLSFlagsExtension is the 0x12E0 codepoint itself. utls has no named
+// constant for it, so it is a GenericExtension.
+const chromiumTLSFlagsExtension uint16 = 0x12e0
 
 // Platform represents the OS the browser is running on.
 type Platform string
@@ -162,7 +193,7 @@ func chromiumTLSHelloID(v int, isAndroid bool) utls.ClientHelloID {
 			return utls.HelloChrome_120
 		}
 		return utls.HelloChrome_131
-	default: // 132 through 152
+	default: // 132 and up; 153+ additionally carries extension 0x12E0
 		return utls.HelloChrome_133
 	}
 }
@@ -669,7 +700,8 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 // Custom Chrome 132+ TLS spec (desktop + Android, identical)
 // =====================================================================
 
-// chrome133TLSSpec matches real Chrome 132 through 152 on desktop and Android.
+// chrome133TLSSpec matches real Chrome 132 and up on desktop and Android. 153 adds
+// extension 0x12E0 on top of the 132-152 shape; see chromiumTLSFlagsFrom.
 // MLKEM768 (4588), new ALPS (17613), ECH, brotli compression, extension shuffling.
 //
 // The cipher list, extension set, and supported_groups are identical across that
@@ -758,6 +790,13 @@ func chrome133TLSSpec(majorNum int, exp chromeExperiments) (*utls.ClientHelloSpe
 	// would pin GREASE off the end of the list.
 	if trustAnchors != nil {
 		exts = append(exts, trustAnchors)
+	}
+	// Same constraint as trustAnchors above: ahead of the trailing GREASE.
+	if majorNum >= chromiumTLSFlagsFrom {
+		exts = append(exts, &utls.GenericExtension{
+			Id:   chromiumTLSFlagsExtension,
+			Data: []byte{0x3e, 0x80},
+		})
 	}
 	exts = append(exts, utls.BoringGREASEECH(), &utls.UtlsGREASEExtension{})
 

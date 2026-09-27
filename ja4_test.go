@@ -393,9 +393,26 @@ const (
 		"4588-29-23-24,0"
 	chromeJA3NTrustAnchorsHash = "bd4930bd9b000ee684830e44bab76fdf"
 
+	/*
+	   18-extension JA3N, Chrome 153+: extension 0x12E0 (4832) joins the list.
+
+	   VERIFIED AGAINST THE WIRE, not derived from this package's own output. A real
+	   Chrome 153 macOS capture (2026-09-27) yields JA4
+	   t13d1518h2_8daaf6152771_4980c97edce0, recomputed independently from its
+	   ClientHello: 15 non-GREASE ciphers, 18 non-GREASE extensions, and a JA4_c over
+	   the sorted extensions (SNI and ALPN excluded) plus the signature algorithms with
+	   GREASE filtered from BOTH lists. See chromiumTLSFlagsFrom in profiles.go.
+	*/
+	chromeJA3NTLSFlags = "771," +
+		"4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53," +
+		"0-5-10-11-13-16-18-23-27-35-43-45-51-4832-17613-51764-65037-65281," +
+		"4588-29-23-24,0"
+	chromeJA3NTLSFlagsHash = "a3a3161a080b73bda9cc285fb367fcc0"
+
 	chromeJA4Pre150  = "t13d1516h2_8daaf6152771_d8a2da3f94cd" // 132-149
 	chromeJA4From150 = "t13d1516h2_8daaf6152771_806a8c22fdea" // 150-151
-	chromeJA4From152 = "t13d1517h2_8daaf6152771_cb7bf5808d99" // 152+
+	chromeJA4From152 = "t13d1517h2_8daaf6152771_cb7bf5808d99" // 152
+	chromeJA4From153 = "t13d1518h2_8daaf6152771_4980c97edce0" // 153+, measured
 )
 
 // chromeSigAlgsFrom150 is the signature_algorithms list real Chrome 151 sends,
@@ -411,6 +428,8 @@ var chromeSigAlgsPre150 = chromeSigAlgsFrom150[3:]
 // want returns the expected fingerprint triple for a Chrome major version.
 func wantFingerprint(major int) (ja3n, ja3nHash, ja4 string) {
 	switch {
+	case major >= chromiumTLSFlagsFrom:
+		return chromeJA3NTLSFlags, chromeJA3NTLSFlagsHash, chromeJA4From153
 	case major >= chromeTrustAnchorsFrom:
 		return chromeJA3NTrustAnchors, chromeJA3NTrustAnchorsHash, chromeJA4From152
 	case major >= chromeMLDSAFrom:
@@ -468,7 +487,8 @@ func TestChromeModernFingerprint(t *testing.T) {
 
 // TestChromeTrustAnchorsBoundary pins the Chrome 152 boundary: trust_anchors
 // (51764) is sent by default from 152, carrying the Chrome Root Store IDs, and
-// is absent before that.
+// is absent before that. It also pins the extension COUNT across the range, which
+// steps again at 153 for 0x12E0.
 func TestChromeTrustAnchorsBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		major int
@@ -486,9 +506,18 @@ func TestChromeTrustAnchorsBoundary(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("chrome %d: trust_anchors present = %v, want %v", tc.major, got, tc.want)
 			}
+			/*
+			   The count moves twice up this range, and both steps are measured:
+			   trust_anchors from 152, and extension 0x12E0 from 153 (see
+			   chromiumTLSFlagsFrom — a real Chrome 153 capture carries it in
+			   100 of 100 handshakes).
+			*/
 			wantCount := 16
 			if tc.want {
 				wantCount = 17
+			}
+			if tc.major >= chromiumTLSFlagsFrom {
+				wantCount++
 			}
 			if len(info.extensions) != wantCount {
 				t.Errorf("chrome %d: %d extensions, want %d", tc.major, len(info.extensions), wantCount)
