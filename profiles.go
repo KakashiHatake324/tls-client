@@ -47,8 +47,17 @@ chromiumTLSFlagsFrom is the first Chromium major observed sending extension 0x12
 	readable ClientHello records, so this could equally be an extension we have been
 	omitting for longer. Do not widen the gate without a capture for the major you are
 	widening it to; if a 152 capture shows 0x12E0, lower this constant and say so.
+
+	DROPPED AT 154. A real Chrome 154 capture (macOS, 2026-09-30, tls.peet.ws) sends
+	NO 0x12E0: its JA4 is t13d1517h2_8daaf6152771_cb7bf5808d99 (17 extensions), where
+	the 153 build was 18. So the extension is confined to exactly major 153 —
+	emitting it under a 154 User-Agent produces a t13d1518 shape no real Chrome 154
+	sends, which DataDome reads as a fake Chrome and mints a low-trust challenge.
 */
-const chromiumTLSFlagsFrom = 153
+const (
+	chromiumTLSFlagsFrom  = 153
+	chromiumTLSFlagsUntil = 154 // exclusive: 154 dropped 0x12E0
+)
 
 // chromiumTLSFlagsExtension is the 0x12E0 codepoint itself. utls has no named
 // constant for it, so it is a GenericExtension.
@@ -792,7 +801,7 @@ func chrome133TLSSpec(majorNum int, exp chromeExperiments) (*utls.ClientHelloSpe
 		exts = append(exts, trustAnchors)
 	}
 	// Same constraint as trustAnchors above: ahead of the trailing GREASE.
-	if majorNum >= chromiumTLSFlagsFrom {
+	if majorNum >= chromiumTLSFlagsFrom && majorNum < chromiumTLSFlagsUntil {
 		exts = append(exts, &utls.GenericExtension{
 			Id:   chromiumTLSFlagsExtension,
 			Data: []byte{0x3e, 0x80},
