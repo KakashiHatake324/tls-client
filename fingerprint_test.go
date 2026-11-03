@@ -269,11 +269,14 @@ func TestOkHttpSpecByVersion(t *testing.T) {
 }
 
 // TestPresetOkHttp5Live checks that OkHttp 5.x negotiates TLS 1.3 and HTTP/2
-// and matches the JA3N of a real Android 16 / OkHttp 5.3.0 capture.
+// and reproduces the JA4 and JA3N of a real Android 16 / OkHttp 5.3.0 capture.
 //
-// Only JA3N is asserted, not JA4: tls.peet.ws excludes the padding extension
-// (0x0015) from JA4_c while other JA4 implementations include it, so the JA4_c
-// value is tool-dependent even for an identical ClientHello.
+// The JA4_c here depends on the padding extension being emitted, which in turn
+// depends on the ClientHello length: BoringPaddingStyle only pads a hello
+// between 0x100 and 0x200 bytes, so a longer SNI than peetURL's can push the
+// hello out of the band and drop the extension. Real OkHttp does the same
+// thing, so this is faithful rather than a bug, but it does mean the pin below
+// is specific to this host.
 func TestPresetOkHttp5Live(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -299,8 +302,9 @@ func TestPresetOkHttp5Live(t *testing.T) {
 	if gotJA3N != wantJA3N {
 		t.Errorf("ja3n = %q, want %q\n  normalized: %s", gotJA3N, wantJA3N, norm)
 	}
-	if !strings.HasPrefix(pr.TLS.JA4, "t13d1513h2_8daaf6152771_") {
-		t.Errorf("ja4 = %q, want t13d1513h2_8daaf6152771_ prefix", pr.TLS.JA4)
+	const wantJA4 = "t13d1513h2_8daaf6152771_eca864cca44a"
+	if pr.TLS.JA4 != wantJA4 {
+		t.Errorf("ja4 = %q, want %q", pr.TLS.JA4, wantJA4)
 	}
 }
 
@@ -332,5 +336,63 @@ func TestJA3ModeNegotiatesTLS13(t *testing.T) {
 	// supported_versions leaves the legacy_version field at 771.
 	if pr.TLS.JA3 != chromeJA3 {
 		t.Errorf("JA3 no longer round-trips:\n  got:  %s\n  want: %s", pr.TLS.JA3, chromeJA3)
+	}
+}
+
+// TestLegacySafariVersions covers the pre-16 range, which maps onto uTLS's
+// era-matched iOS presets instead of the hand-written modern spec. Safari 11
+// and 12 predate TLS 1.3, so they are expected to negotiate 1.2.
+func TestLegacySafariVersions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	cases := []struct {
+		version string
+		plat    string
+		wantTLS string
+		wantJA4 string
+	}{
+		{"11.1", "ios", "771", "t12d2010h2"},
+		{"12.1", "ios", "771", "t12d2310h2"},
+		{"13.0", "ios", "772", "t13d2613h2"},
+		{"14.0", "ios", "772", "t13d2613h2"},
+		{"15.6", "ios", "772", "t13d2613h2"},
+		{"13.0", "ipados", "772", "t13d2613h2"},
+		{"15.6", "mac", "772", "t13d2613h2"},
+	}
+
+	for _, tc := range cases {
+		c, err := NewClientWithPreset("safari", tc.version, tc.plat)
+		if err != nil {
+			t.Errorf("safari %s %s: %v", tc.version, tc.plat, err)
+			continue
+		}
+
+		pr := fetchPeet(t, c)
+		if pr.TLS.TLSVersionNegotiated != tc.wantTLS {
+			t.Errorf("safari %s %s: tls version = %q, want %q",
+				tc.version, tc.plat, pr.TLS.TLSVersionNegotiated, tc.wantTLS)
+		}
+		if pr.HTTPVersion != "h2" {
+			t.Errorf("safari %s %s: http version = %q, want h2", tc.version, tc.plat, pr.HTTPVersion)
+		}
+		if got := strings.SplitN(pr.TLS.JA4, "_", 2)[0]; got != tc.wantJA4 {
+			t.Errorf("safari %s %s: JA4_a = %q, want %q", tc.version, tc.plat, got, tc.wantJA4)
+		}
+		c.Close()
+	}
+}
+
+func TestSafariBelowFloorRejected(t *testing.T) {
+	for _, v := range []string{"9.0", "10.1"} {
+		_, err := NewClientWithPreset("safari", v, "ios")
+		if err == nil {
+			t.Errorf("safari %s should be rejected", v)
+			continue
+		}
+		if !strings.Contains(err.Error(), "minimum supported version is 11") {
+			t.Errorf("safari %s: error = %v, want a minimum-version message", v, err)
+		}
 	}
 }

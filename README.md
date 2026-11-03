@@ -38,6 +38,30 @@ fmt.Println(client.Info.SecChUAPlatform) // "macOS"
 resp, err := client.Get("https://tls.peet.ws/api/all")
 ```
 
+### From a User-Agent
+
+If you already have a UA string, let the library pick the preset for you:
+
+```go
+client, err := tlsclient.NewClientWithUserAgent(
+    "Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
+)
+```
+
+The browser, version, platform, and OS version are read out of the UA, and
+requests go out with that exact string rather than the one the preset would
+synthesize. Recognized tokens are Chrome, CriOS, Edg/Edge/EdgA/EdgiOS, Brave,
+Firefox, FxiOS, Safari's `Version/`, and okhttp. Chromium re-skins
+(Samsung Internet, Yandex, Opera) resolve to their underlying Chrome version.
+
+Two fallbacks keep real-world traffic working. An iPhone or iPad UA with no
+browser token is an in-app WebView — the Google app, Facebook, Instagram,
+Firefox for iOS — and since Apple requires every iOS browser to render with
+WebKit over the system TLS stack, they all handshake like Safari of the same OS
+version. A UA with no platform token at all, which is typical of crawlers and
+headless tooling, falls back to Linux; Chromium's ClientHello is identical
+across desktop platforms, so this only affects the client hints.
+
 ### Custom JA3 String
 
 ```go
@@ -212,11 +236,11 @@ resp, err := client.Do(req) // returns *fhttp.Response — you own Body.Close()
 
 | Browser | win | mac | linux | android | ios | ipados |
 |---------|:---:|:---:|:-----:|:-------:|:---:|:------:|
-| **chrome** (100+) | x | x | x | x | x | x |
-| **edge** (100+) | x | x | x | x | | |
-| **brave** (100+) | x | x | x | x | | |
+| **chrome** (58+) | x | x | x | x | x | x |
+| **edge** (58+) | x | x | x | x | | |
+| **brave** (58+) | x | x | x | x | | |
 | **firefox** (55+) | x | x | x | x | | |
-| **safari** (16+) | | x | | | x | x |
+| **safari** (11+) | | x | | | x | x |
 | **okhttp** | | | | x | | |
 
 Notes:
@@ -224,6 +248,13 @@ Notes:
 - Chrome/Edge/Brave on Android send `sec-ch-ua-mobile: ?1` and a mobile user-agent
 - Safari only runs on Apple platforms
 - OkHttp mimics native Android apps using the OkHttp library
+
+The version floors are set by the oldest ClientHello uTLS ships a preset for.
+Versions above a floor but below the modern specs land on the closest
+era-appropriate preset, so a long-EOL build still gets a plausible fingerprint
+rather than an error: Chrome 58-131 and Safari 11-15 are modelled this way.
+Versions below a floor are rejected by `NewClientWithPreset`, and raised to the
+floor by `NewClientWithUserAgent`.
 
 Version-dependent behavior worth knowing about:
 
@@ -234,6 +265,7 @@ Version-dependent behavior worth knowing about:
 | chrome/edge/brave | 152+ | Sends the `trust_anchors` extension (0xca34) on every hello with the 32 Chrome Root Store IDs, taking the extension count to 17, and prepends a per-connection GREASE value to `signature_algorithms`. Moves both JA3N and JA4. Override with `WithoutTrustAnchors()`. |
 | firefox | 132+ desktop | Offers the hybrid post-quantum group `X25519MLKEM768` (4588). Not sent on Android, matching real Firefox. |
 | firefox | 151+ | Drops the ECDSA-CBC cipher 49161, taking the list from 17 suites to 16. |
+| safari | 11-15 | Uses the era-matched uTLS iOS preset on every Apple platform. These builds predate `NO_RFC7540_PRIORITIES` (RFC 9218, 2022), so they also use the classic Safari HTTP/2 SETTINGS shape rather than the current one. Safari 11-12 negotiate TLS 1.2. |
 | safari | 26+ | Offers `X25519MLKEM768` on macOS, iOS, and iPadOS, which Apple enabled by default across the 26 releases. |
 | okhttp | 5+ | Uses a TLS 1.3 spec that negotiates HTTP/2. Older versions fall back to a TLS 1.2-only fingerprint with no ALPN, so they speak HTTP/1.1 and carry no Akamai fingerprint. |
 
@@ -267,6 +299,7 @@ tlsclient.NewClientWithPreset("okhttp", "5.3.0", "android")
 | Function | Description |
 |----------|-------------|
 | `NewClientWithPreset(browser, version, platform, ...Option)` | Mimic a specific browser/version/platform |
+| `NewClientWithUserAgent(ua, ...Option)` | Infer the preset from a User-Agent string and send that exact UA |
 | `NewClientWithJA3(ja3, ...Option)` | Build fingerprint from a JA3 string |
 | `NewClientFromPool([]BrowserSpec, ...Option)` | Pick a random browser from a pool |
 
@@ -614,8 +647,12 @@ tls-client/
 ├── client.go          Client API, constructors, options
 ├── profiles.go        Browser fingerprint profiles (TLS + HTTP/2 + headers)
 ├── transport.go       Transport wrapper (header ordering, H2 config)
+├── useragent.go       User-Agent parsing and preset inference
 ├── client_test.go     Integration tests
 ├── ja4_test.go        Offline JA3/JA4 verification (no network)
+├── fingerprint_test.go  Per-version fingerprint pins (JA4/JA3N)
+├── testdata/
+│   └── useragents.json  Real-world User-Agent corpus
 ├── ja3/
 │   ├── parser.go      JA3 string parser
 │   └── parser_test.go

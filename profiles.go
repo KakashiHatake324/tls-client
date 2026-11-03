@@ -112,8 +112,8 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 	if err != nil {
 		return nil, err
 	}
-	if majorNum < 100 {
-		return nil, fmt.Errorf("chromium %s: minimum supported version is 100", version)
+	if majorNum < chromiumMinVersion {
+		return nil, fmt.Errorf("chromium %s: minimum supported version is %d", version, chromiumMinVersion)
 	}
 
 	isAppleMobile := platform == PlatformIOS || platform == PlatformIPadOS
@@ -176,8 +176,26 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 // The cipher list and supported_groups have not moved since 132. Extensions and
 // signature_algorithms both do, at 150 and 152, so one spec covers the range
 // with those two version gates inside it.
+// chromiumMinVersion is the oldest Chromium this package can model, set by
+// uTLS's oldest Chrome preset (HelloChrome_58).
+const chromiumMinVersion = 58
+
 func chromiumTLSHelloID(v int, isAndroid bool) utls.ClientHelloID {
 	switch {
+	case v < 62:
+		return utls.HelloChrome_58
+	case v < 70:
+		return utls.HelloChrome_62
+	case v < 72:
+		return utls.HelloChrome_70
+	case v < 83:
+		return utls.HelloChrome_72
+	case v < 87:
+		return utls.HelloChrome_83
+	case v < 96:
+		return utls.HelloChrome_87
+	case v < 100:
+		return utls.HelloChrome_96
 	case v < 102:
 		return utls.HelloChrome_100
 	case v < 106:
@@ -333,8 +351,8 @@ func firefoxProfile(version string) (*browserProfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	if majorNum < 55 {
-		return nil, fmt.Errorf("firefox %s: minimum supported version is 55", version)
+	if majorNum < firefoxMinVersion {
+		return nil, fmt.Errorf("firefox %s: minimum supported version is %d", version, firefoxMinVersion)
 	}
 
 	helloID := firefoxTLSHelloID(majorNum)
@@ -388,6 +406,10 @@ func firefoxUsesPQ(majorNum int, p Platform) bool {
 // Branch"); the captured stable build already omits the cipher, so the
 // observed boundary is used here. Versions 120-150 keep the 17-cipher list.
 const firefoxDropsECDSACBCFrom = 151
+
+// firefoxMinVersion is the oldest Firefox this package can model, set by uTLS's
+// oldest Firefox preset (HelloFirefox_55).
+const firefoxMinVersion = 55
 
 func firefoxTLSHelloID(v int) utls.ClientHelloID {
 	switch {
@@ -455,26 +477,73 @@ func firefoxHeaders(version string) func(Platform) (http.Header, error) {
 // Safari
 // =====================================================================
 
+// safariMinVersion is the oldest Safari this package can model. It is set by
+// uTLS, whose oldest Apple-stack preset is HelloIOS_11_1.
+const safariMinVersion = 11
+
+// safariModernSpecFrom is the first Safari version that uses this package's
+// hand-written Apple specs. Below it, the era-matched uTLS preset is used
+// instead; see safariTLSHelloID.
+const safariModernSpecFrom = 16
+
+// safariTLSHelloID maps a pre-16 Safari version to the closest uTLS preset.
+//
+// uTLS ships no macOS Safari preset older than 16.0, so older macOS versions
+// reuse the era-matched iOS preset. Both platforms run Apple's coreTLS, and an
+// era-matched capture is far closer than Safari 16.0, which carries GREASE and
+// extensions that no Safari 13 ever sent.
+func safariTLSHelloID(v int) utls.ClientHelloID {
+	switch {
+	case v < 12:
+		return utls.HelloIOS_11_1
+	case v < 13:
+		return utls.HelloIOS_12_1
+	case v < 14:
+		return utls.HelloIOS_13
+	default: // 14 and 15
+		return utls.HelloIOS_14
+	}
+}
+
 func safariProfile(version string, platform Platform) (*browserProfile, error) {
 	_, majorNum, err := parseMajor(version)
 	if err != nil {
 		return nil, err
 	}
-	if majorNum < 16 {
-		return nil, fmt.Errorf("safari %s: minimum supported version is 16", version)
+	if majorNum < safariMinVersion {
+		return nil, fmt.Errorf("safari %s: minimum supported version is %d", version, safariMinVersion)
+	}
+
+	legacy := majorNum < safariModernSpecFrom
+	if legacy {
+		helloID := safariTLSHelloID(majorNum)
+		if _, err := utls.UTLSIdToSpec(helloID); err != nil {
+			return nil, fmt.Errorf("safari %s: %w", version, err)
+		}
 	}
 
 	isIOS := platform == PlatformIOS || platform == PlatformIPadOS
+
 	var h2 *h2Profile
-	if isIOS {
+	switch {
+	case legacy:
+		// Pre-16 Safari predates NO_RFC7540_PRIORITIES (RFC 9218, 2022), which
+		// iosH2Profile advertises, so use the classic Safari SETTINGS shape on
+		// every platform rather than pairing an old ClientHello with a new
+		// HTTP/2 fingerprint.
+		h2 = safariMacH2Profile()
+	case isIOS:
 		h2 = iosH2Profile()
-	} else {
+	default:
 		h2 = safariMacH2Profile()
 	}
 
 	return &browserProfile{
 		h2: h2,
 		specFn: func(p Platform) (func() *utls.ClientHelloSpec, error) {
+			if legacy {
+				return newSpecFunc(safariTLSHelloID(majorNum)), nil
+			}
 			if p == PlatformIOS || p == PlatformIPadOS {
 				return newIOSSpecFunc(majorNum), nil
 			}
