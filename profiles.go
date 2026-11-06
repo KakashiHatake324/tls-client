@@ -11,12 +11,15 @@ import (
 )
 
 // currentChromeMajor is the latest Chrome stable major version this package has
-// been verified against (153, from a real macOS capture on 2026-09-27; 152 was
-// stable since 2026-08-25). Used as the default when no explicit version is
-// available (e.g. JA3 mode). Every version from 120 up shares the same HTTP/2
-// profile, so bumping this is documentation rather than a behavior change for H2 —
-// the ClientHello difference at 153 is carried by chromiumTLSFlagsFrom instead.
-const currentChromeMajor = 153
+// been verified against. 157 went stable on 2026-11-03 (Chrome has shipped a new
+// major every two weeks since 153) and was captured on 2026-11-06 from the stable
+// 157.0.8103.38 binary on fresh macOS profiles: 9 hellos through cmd/hellodump
+// and 8 through tls.peet.ws. 156 was read the same day from a real, headed,
+// Finch-seeded Chrome 156.0.8078.x. Used as the default when no explicit version
+// is available (e.g. JA3 mode). Every version from 120 up shares the same HTTP/2
+// profile, so bumping this is documentation rather than a behavior change for
+// H2, and the ClientHello has not moved since 154.
+const currentChromeMajor = 157
 
 // chromiumModernSpecFrom is the first Chromium major version that sends the
 // current ClientHello shape: MLKEM768 key share, ALPS codepoint 17613, GREASE
@@ -25,43 +28,61 @@ const currentChromeMajor = 153
 const chromiumModernSpecFrom = 132
 
 /*
-chromiumTLSFlagsFrom is the first Chromium major observed sending extension 0x12E0.
+chromiumServerPaddingFrom and chromiumServerPaddingUntil bound the one Chrome major
+this package sends BoringSSL's server_padding extension for by default.
 
-	MEASURED, NOT NAMED. A real Chrome 153 capture (macOS, 2026-09-27) sends a 20th
-	ClientHello extension this package did not emit:
+	WHAT 0x12E0 IS. Extension 4832 (0x12E0) is TLSEXT_TYPE_server_padding in
+	BoringSSL's include/openssl/tls1.h: "Extension allowing the server to add
+	additional bytes of padding to EncryptedExtensions. This is not an IANA defined
+	extension number." The two-byte payload is the number of padding bytes the
+	client asks the server to add (SSL_set_server_padding_request), capped at 16 KiB
+	on the server side. ssl.h calls it "a temporary feature supporting an
+	experiment" that "will be removed on conclusion of the experiment". It is NOT
+	draft-ietf-tls-tlsflags, whose codepoint is 62.
 
-	    type 4832 (0x12E0), payload 3e80 — two bytes, 16000 big-endian
+	WHAT TURNS IT ON. Chromium requests it from net/socket/ssl_connect_job.cc via
+	SSLContextConfig::RequestServerPadding(), controlled by the base::Feature
+	AddTLSServerHandshakePadding with the int param AddTLSServerHandshakePaddingBytes
+	(net/base/features.cc). The feature is FEATURE_DISABLED_BY_DEFAULT with a default
+	of 0 bytes at both 156.0.8078.80 and 157.0.8103.38. Real Chrome therefore sends
+	it only when a Finch field trial (study "PqcBandwidthExperiment") enables it, so
+	its presence depends on the client's variations seed, not on the Chrome version.
 
-	It is in 100 of 100 handshakes in that capture, across three hosts
-	(www.google.com, www.ticketmaster.com, ticketmaster.com), with a byte-identical
-	payload every time. So it is unconditional for that build, not a per-connection or
-	per-host value.
+	WHAT WAS MEASURED, all on macOS:
 
-	NOT record_size_limit, whose codepoint is 0x001C (utls fakeRecordSizeLimit) and
-	which is already absent from Chrome's list. The semantics of 0x12E0 are NOT
-	established here; it is reproduced verbatim because a constant two-byte payload
-	observed 100/100 needs no interpretation to replay.
+	    153 stable, headed, seeded profile   2026-09-27  PRESENT, payload 3e80 (16000), 100/100 hellos
+	    154 stable                           2026-09-30  absent (tls.peet.ws, 17 extensions)
+	    156 stable 156.0.8078.x, headed,
+	        seeded profile                   2026-11-06  absent (tls.peet.ws, 17 extensions + a resumption PSK)
+	    157 stable 157.0.8103.38, fresh
+	        profile, headless, two launches  2026-11-06  absent (hellodump, 9 hellos)
+	    Chrome for Testing 156.0.8078.80,
+	        fresh profile, headless          2026-11-06  PRESENT, payload 0000, 9/9 hellos
 
-	GATED AT 153 BECAUSE 153 IS WHAT WAS MEASURED. Whether 151 and 152 also send it is
-	UNKNOWN — the captures for those majors are Charles binary sessions with no
-	readable ClientHello records, so this could equally be an extension we have been
-	omitting for longer. Do not widen the gate without a capture for the major you are
-	widening it to; if a 152 capture shows 0x12E0, lower this constant and say so.
+	THE CHROME FOR TESTING TRAP. Unbranded Chromium builds, Chrome for Testing
+	included, compile in testing/variations/fieldtrial_testing_config.json and apply
+	it as if it were a Finch seed. At 156 and 157 that file's PqcBandwidthExperiment
+	study enables AddTLSServerHandshakePadding with AddTLSServerHandshakePaddingBytes
+	set to 0, which is exactly the 0000 payload the CfT capture shows. Branded Chrome
+	ignores that file. A CfT capture is therefore NOT evidence of what stable Chrome
+	sends for this extension; its JA4 t13d1518h2_8daaf6152771_4980c97edce0 (18
+	extensions) is the same as the 153 capture's, because JA4 ignores bodies.
 
-	DROPPED AT 154. A real Chrome 154 capture (macOS, 2026-09-30, tls.peet.ws) sends
-	NO 0x12E0: its JA4 is t13d1517h2_8daaf6152771_cb7bf5808d99 (17 extensions), where
-	the 153 build was 18. So the extension is confined to exactly major 153 —
-	emitting it under a 154 User-Agent produces a t13d1518 shape no real Chrome 154
-	sends, which DataDome reads as a fake Chrome and mints a low-trust challenge.
+	THE DEFAULT HERE follows the stable captures: on for exactly major 153, with the
+	16000-byte request that build sent, and off everywhere else. Emitting it under a
+	154+ User-Agent produces a t13d1518 shape no stable capture shows, which DataDome
+	reads as a fake Chrome and answers with a low-trust challenge. WithServerPadding
+	reproduces a Finch-enrolled client at any 132+ version, and WithoutServerPadding
+	turns the 153 default off.
 */
 const (
-	chromiumTLSFlagsFrom  = 153
-	chromiumTLSFlagsUntil = 154 // exclusive: 154 dropped 0x12E0
+	chromiumServerPaddingFrom  = 153
+	chromiumServerPaddingUntil = 154 // exclusive
 )
 
-// chromiumTLSFlagsExtension is the 0x12E0 codepoint itself. utls has no named
-// constant for it, so it is a GenericExtension.
-const chromiumTLSFlagsExtension uint16 = 0x12e0
+// chromeServerPaddingBytes153 is the padding request the Chrome 153 capture
+// carried: 0x3e80, 16000 bytes.
+const chromeServerPaddingBytes153 uint16 = 16000
 
 // Platform represents the OS the browser is running on.
 type Platform string
@@ -143,7 +164,7 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 				return newChrome133SpecFunc(majorNum, exp)
 			}
 			if exp.any() {
-				return nil, fmt.Errorf("chromium %s: WithTrustAnchors/WithMLDSA/WithoutMLDSA require version %d or newer",
+				return nil, fmt.Errorf("chromium %s: WithTrustAnchors/WithMLDSA/WithoutMLDSA/WithServerPadding require version %d or newer",
 					version, chromiumModernSpecFrom)
 			}
 			id := chromiumTLSHelloID(majorNum, isAndroid)
@@ -172,10 +193,16 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 //	     list, taking the extension count to 17, and a GREASE value is prepended
 //	     to signature_algorithms. See chromeTrustAnchorsFrom and
 //	     chromeGreaseSigAlgsFrom; override with WithoutTrustAnchors.
+//	153: server_padding (0x12E0) sent by default with a 16000-byte request, as a
+//	     real Chrome 153 did; 18 extensions. A Finch arm, not a version feature.
+//	     See chromiumServerPaddingFrom; override with WithServerPadding and
+//	     WithoutServerPadding.
+//	154-157: back to the 152 shape. The Chrome Root Store list inside
+//	     trust_anchors has 28 IDs from 153 on; see chromeTrustAnchorList153From.
 //
 // The cipher list and supported_groups have not moved since 132. Extensions and
-// signature_algorithms both do, at 150 and 152, so one spec covers the range
-// with those two version gates inside it.
+// signature_algorithms both do, at 150 and 152, plus the 153-only server_padding
+// arm, so one spec covers the range with those version gates inside it.
 // chromiumMinVersion is the oldest Chromium this package can model, set by
 // uTLS's oldest Chrome preset (HelloChrome_58).
 const chromiumMinVersion = 58
@@ -220,7 +247,7 @@ func chromiumTLSHelloID(v int, isAndroid bool) utls.ClientHelloID {
 			return utls.HelloChrome_120
 		}
 		return utls.HelloChrome_131
-	default: // 132 and up; 153+ additionally carries extension 0x12E0
+	default: // 132 and up; 153 additionally carries server_padding by default
 		return utls.HelloChrome_133
 	}
 }
@@ -779,7 +806,8 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 // =====================================================================
 
 // chrome133TLSSpec matches real Chrome 132 and up on desktop and Android. 153 adds
-// extension 0x12E0 on top of the 132-152 shape; see chromiumTLSFlagsFrom.
+// the server_padding extension on top of the 152 shape and 154 takes it away
+// again; see chromiumServerPaddingFrom.
 // MLKEM768 (4588), new ALPS (17613), ECH, brotli compression, extension shuffling.
 //
 // The cipher list, extension set, and supported_groups are identical across that
@@ -797,12 +825,22 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 //	150-151: 16 ext, ML-DSA prepended to sigalgs
 //	         JA3N 8e19337e7524d2573be54efb2b0784c9 (unchanged!)
 //	         JA4  t13d1516h2_8daaf6152771_806a8c22fdea
-//	152+:    17 ext (trust_anchors added), GREASE prepended to sigalgs
+//	152:     17 ext (trust_anchors added), GREASE prepended to sigalgs
+//	         JA3N bd4930bd9b000ee684830e44bab76fdf
+//	         JA4  t13d1517h2_8daaf6152771_cb7bf5808d99
+//	153:     18 ext (server_padding, a Finch arm; see chromiumServerPaddingFrom)
+//	         JA3N a3a3161a080b73bda9cc285fb367fcc0
+//	         JA4  t13d1518h2_8daaf6152771_4980c97edce0
+//	154-157: back to the 152 shape. The Chrome Root Store list inside
+//	         trust_anchors is down from 32 IDs to 28 from 153 on, which no
+//	         fingerprint can see (bodies are not hashed)
 //	         JA3N bd4930bd9b000ee684830e44bab76fdf
 //	         JA4  t13d1517h2_8daaf6152771_cb7bf5808d99
 //
-// Every value above comes from a live capture: Chrome 151.0.7922.174 (headed and
-// headless, 2026-08-30) and Chrome 152.0.7977.65 (2026-08-31), both on macOS.
+// Every value above comes from a live capture on macOS: Chrome 151.0.7922.174
+// (headed and headless, 2026-08-30), Chrome 152.0.7977.65 (2026-08-31), Chrome
+// 153 (headed, 2026-09-27), Chrome 154 (2026-09-30), a real headed Chrome
+// 156.0.8078.x and a fresh Chrome 157.0.8103.38 (both 2026-11-06).
 //
 // The 150 row is the cautionary one: JA3 and JA3N do not encode signature
 // algorithms, so they are byte-identical either side of that change and report a
@@ -870,11 +908,8 @@ func chrome133TLSSpec(majorNum int, exp chromeExperiments) (*utls.ClientHelloSpe
 		exts = append(exts, trustAnchors)
 	}
 	// Same constraint as trustAnchors above: ahead of the trailing GREASE.
-	if majorNum >= chromiumTLSFlagsFrom && majorNum < chromiumTLSFlagsUntil {
-		exts = append(exts, &utls.GenericExtension{
-			Id:   chromiumTLSFlagsExtension,
-			Data: []byte{0x3e, 0x80},
-		})
+	if serverPadding := exp.serverPaddingExtension(majorNum); serverPadding != nil {
+		exts = append(exts, serverPadding)
 	}
 	exts = append(exts, utls.BoringGREASEECH(), &utls.UtlsGREASEExtension{})
 

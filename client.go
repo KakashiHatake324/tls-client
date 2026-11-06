@@ -162,6 +162,43 @@ func WithoutTrustAnchors() Option {
 	}
 }
 
+// WithServerPadding adds BoringSSL's server_padding extension (0x12E0) to the
+// ClientHello, asking the server to pad EncryptedExtensions by n bytes.
+// Chromium presets only.
+//
+// Real Chrome sends this only while enrolled in the AddTLSServerHandshakePadding
+// Finch experiment, so it is a property of a client's variations seed rather
+// than of the Chrome version: a headed Chrome 153 was captured sending it with
+// n=16000 on every connection, while stable 154, 156, and 157 captures do not
+// send it at all. The presets therefore send it by default for 153 alone. Use
+// this to reproduce an enrolled client at another version, or to change the 153
+// request size. It adds an 18th extension and moves JA4 from
+// t13d1517h2_8daaf6152771_cb7bf5808d99 to t13d1518h2_8daaf6152771_4980c97edce0
+// whatever n is, since JA4 ignores extension bodies.
+//
+// Chrome for Testing sends it with n=0 on a fresh profile because unbranded
+// builds apply Chromium's field-trial testing config; branded stable Chrome
+// does not, so do not copy that shape from a CfT capture.
+func WithServerPadding(n uint16) Option {
+	return func(c *Client) {
+		c.experiments.serverPadding = n
+		c.experiments.serverPaddingSet = true
+		c.experiments.serverPaddingOff = false
+	}
+}
+
+// WithoutServerPadding removes the server_padding extension from the one
+// Chromium preset version that sends it by default (153), reproducing the
+// 17-extension shape of a Chrome 153 that was not in the experiment.
+// Chromium presets only.
+func WithoutServerPadding() Option {
+	return func(c *Client) {
+		c.experiments.serverPaddingOff = true
+		c.experiments.serverPaddingSet = false
+		c.experiments.serverPadding = 0
+	}
+}
+
 // WithMLDSA forces the post-quantum ML-DSA signature schemes mldsa44 (0x0904),
 // mldsa65 (0x0905), and mldsa87 (0x0906) to be advertised ahead of the classical
 // algorithms in signature_algorithms. Chromium presets only.
@@ -197,7 +234,7 @@ func WithoutMLDSA() Option {
 // Chromium presets only, and no-op in JA3 mode, which carries no browser
 // identity to derive a User-Agent from.
 //
-//	client, _ := tlsclient.NewClientWithPreset("chrome", "152.0.0.0", "mac",
+//	client, _ := tlsclient.NewClientWithPreset("chrome", "157.0.0.0", "mac",
 //	    tlsclient.WithGoogleHeaders(tlsclient.GoogleHeaders{
 //	        ClientData: "CM6XywE=",                    // captured, or ClientDataHeader(...)
 //	        Validation: "S7hKo5PWMhrUgzQMwm5wWB2agsI=", // captured; see BrowserValidation

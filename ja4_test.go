@@ -32,6 +32,7 @@ type helloInfo struct {
 	alpn          []string
 	supportedVers []uint16 // GREASE removed
 	hasSNI        bool
+	extBodies     map[uint16][]byte // every non-GREASE extension's body, for checks the hashes cannot make
 }
 
 const (
@@ -114,6 +115,10 @@ func parseClientHello(b []byte) (helloInfo, error) {
 			continue
 		}
 		h.extensions = append(h.extensions, id)
+		if h.extBodies == nil {
+			h.extBodies = map[uint16][]byte{}
+		}
+		h.extBodies[id] = body
 
 		switch id {
 		case extSNI:
@@ -367,17 +372,23 @@ func fingerprintPreset(t *testing.T, browser, version string, platform Platform,
 }
 
 // Reference fingerprints for the Chromium ClientHello, all captured off the wire
-// from real browsers with a local ClientHello dump:
+// from real browsers with a local ClientHello dump or at tls.peet.ws:
 //
 //	Chrome 151.0.7922.174 macOS, headed and headless (2026-08-30)
 //	Chrome 152.0.7977.65  macOS, fresh profile          (2026-08-31)
+//	Chrome 153            macOS, headed                 (2026-09-27)
+//	Chrome 154            macOS                         (2026-09-30)
+//	Chrome 156.0.8078.x   macOS, headed, Finch-seeded   (2026-11-06)
+//	Chrome 157.0.8103.38  macOS, fresh profile          (2026-11-06)
 //
-// Three eras, each differing from the last in exactly one place:
+// Four eras, each differing from the last in exactly one place:
 //
 //	132-149  classical signature algorithms, 16 extensions
 //	150-151  ML-DSA prepended to signature_algorithms   (JA4_c moves; JA3N does not)
-//	152+     trust_anchors extension added, 17 extensions, and a GREASE value
+//	152      trust_anchors extension added, 17 extensions, and a GREASE value
 //	         prepended to signature_algorithms          (JA3N and JA4 both move)
+//	153      server_padding extension added, 18 extensions (a Finch arm)
+//	154-157  back to the 152 shape
 const (
 	// 16-extension JA3N, Chrome 132 through 151.
 	chromeJA3N = "771," +
@@ -394,25 +405,28 @@ const (
 	chromeJA3NTrustAnchorsHash = "bd4930bd9b000ee684830e44bab76fdf"
 
 	/*
-	   18-extension JA3N, Chrome 153+: extension 0x12E0 (4832) joins the list.
+	   18-extension JA3N, Chrome 153 only: server_padding (4832, 0x12E0) joins the
+	   list for the one major whose stable capture carried the Finch arm.
 
 	   VERIFIED AGAINST THE WIRE, not derived from this package's own output. A real
 	   Chrome 153 macOS capture (2026-09-27) yields JA4
 	   t13d1518h2_8daaf6152771_4980c97edce0, recomputed independently from its
 	   ClientHello: 15 non-GREASE ciphers, 18 non-GREASE extensions, and a JA4_c over
 	   the sorted extensions (SNI and ALPN excluded) plus the signature algorithms with
-	   GREASE filtered from BOTH lists. See chromiumTLSFlagsFrom in profiles.go.
+	   GREASE filtered from BOTH lists. Chrome for Testing 156.0.8078.80 reports the
+	   same JA4 at tls.peet.ws because of the testing-config artifact described at
+	   chromiumServerPaddingFrom in profiles.go; stable 154, 156, and 157 do not.
 	*/
-	chromeJA3NTLSFlags = "771," +
+	chromeJA3NServerPadding = "771," +
 		"4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53," +
 		"0-5-10-11-13-16-18-23-27-35-43-45-51-4832-17613-51764-65037-65281," +
 		"4588-29-23-24,0"
-	chromeJA3NTLSFlagsHash = "a3a3161a080b73bda9cc285fb367fcc0"
+	chromeJA3NServerPaddingHash = "a3a3161a080b73bda9cc285fb367fcc0"
 
-	chromeJA4Pre150  = "t13d1516h2_8daaf6152771_d8a2da3f94cd" // 132-149
-	chromeJA4From150 = "t13d1516h2_8daaf6152771_806a8c22fdea" // 150-151
-	chromeJA4From152 = "t13d1517h2_8daaf6152771_cb7bf5808d99" // 152
-	chromeJA4From153 = "t13d1518h2_8daaf6152771_4980c97edce0" // 153+, measured
+	chromeJA4Pre150        = "t13d1516h2_8daaf6152771_d8a2da3f94cd" // 132-149
+	chromeJA4From150       = "t13d1516h2_8daaf6152771_806a8c22fdea" // 150-151
+	chromeJA4From152       = "t13d1517h2_8daaf6152771_cb7bf5808d99" // 152, 154-157
+	chromeJA4ServerPadding = "t13d1518h2_8daaf6152771_4980c97edce0" // 153, measured
 )
 
 // chromeSigAlgsFrom150 is the signature_algorithms list real Chrome 151 sends,
@@ -428,8 +442,8 @@ var chromeSigAlgsPre150 = chromeSigAlgsFrom150[3:]
 // want returns the expected fingerprint triple for a Chrome major version.
 func wantFingerprint(major int) (ja3n, ja3nHash, ja4 string) {
 	switch {
-	case major >= chromiumTLSFlagsFrom:
-		return chromeJA3NTLSFlags, chromeJA3NTLSFlagsHash, chromeJA4From153
+	case major >= chromiumServerPaddingFrom && major < chromiumServerPaddingUntil:
+		return chromeJA3NServerPadding, chromeJA3NServerPaddingHash, chromeJA4ServerPadding
 	case major >= chromeTrustAnchorsFrom:
 		return chromeJA3NTrustAnchors, chromeJA3NTrustAnchorsHash, chromeJA4From152
 	case major >= chromeMLDSAFrom:
@@ -451,14 +465,15 @@ func stripGREASE(vals []uint16) []uint16 {
 }
 
 // TestChromeModernFingerprint pins JA3N and JA4 for every Chromium preset on the
-// current ClientHello shape, across both boundaries that move a fingerprint:
-// ML-DSA at Chrome 150 and trust_anchors at Chrome 152.
+// current ClientHello shape, across every boundary that moves a fingerprint:
+// ML-DSA at Chrome 150, trust_anchors at Chrome 152, and the 153-only
+// server_padding arm that 154 through 157 no longer carry.
 //
 // Note that 150 and 151 share a JA3N with 132 while their JA4 differs: JA3 does
 // not encode signature algorithms, so a JA3N-only check passes for a client that
 // no longer matches Chrome. The 152 change moves both.
 func TestChromeModernFingerprint(t *testing.T) {
-	versions := []int{132, 133, 149, 150, 151, 152, 153}
+	versions := []int{132, 133, 149, 150, 151, 152, 153, 154, 155, 156, 157}
 	platforms := []Platform{PlatformMac, PlatformWindows, PlatformLinux, PlatformAndroid}
 	browsers := []string{"chrome", "edge", "brave"}
 
@@ -488,12 +503,12 @@ func TestChromeModernFingerprint(t *testing.T) {
 // TestChromeTrustAnchorsBoundary pins the Chrome 152 boundary: trust_anchors
 // (51764) is sent by default from 152, carrying the Chrome Root Store IDs, and
 // is absent before that. It also pins the extension COUNT across the range, which
-// steps again at 153 for 0x12E0.
+// steps up at 153 for server_padding and back down at 154.
 func TestChromeTrustAnchorsBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		major int
 		want  bool
-	}{{149, false}, {150, false}, {151, false}, {152, true}, {153, true}} {
+	}{{149, false}, {150, false}, {151, false}, {152, true}, {153, true}, {154, true}, {156, true}, {157, true}} {
 		t.Run(fmt.Sprintf("%d", tc.major), func(t *testing.T) {
 			info := presetHello(t, "chrome", fmt.Sprintf("%d.0.0.0", tc.major), PlatformMac)
 
@@ -507,16 +522,17 @@ func TestChromeTrustAnchorsBoundary(t *testing.T) {
 				t.Errorf("chrome %d: trust_anchors present = %v, want %v", tc.major, got, tc.want)
 			}
 			/*
-			   The count moves twice up this range, and both steps are measured:
-			   trust_anchors from 152, and extension 0x12E0 from 153 (see
-			   chromiumTLSFlagsFrom — a real Chrome 153 capture carries it in
-			   100 of 100 handshakes).
+			   The count moves three times up this range, and every step is
+			   measured: trust_anchors from 152, server_padding at 153 (see
+			   chromiumServerPaddingFrom — a real Chrome 153 capture carries it
+			   in 100 of 100 handshakes), and server_padding gone again from 154
+			   (stable 154, 156, and 157 captures).
 			*/
 			wantCount := 16
 			if tc.want {
 				wantCount = 17
 			}
-			if tc.major >= chromiumTLSFlagsFrom {
+			if tc.major >= chromiumServerPaddingFrom && tc.major < chromiumServerPaddingUntil {
 				wantCount++
 			}
 			if len(info.extensions) != wantCount {
@@ -526,20 +542,88 @@ func TestChromeTrustAnchorsBoundary(t *testing.T) {
 	}
 }
 
-// TestChromeTrustAnchorIDsMatchCapture checks the extension body against the
-// bytes real Chrome 152 put on the wire: a 204-byte list of 32 IDs.
+// TestChromeTrustAnchorIDsMatchCapture checks the extension bodies against the
+// bytes real Chrome put on the wire: a 204-byte list of 32 IDs from Chrome 152,
+// and the 184-byte list of 28 IDs that a real headed Chrome 156.0.8078.x and a
+// fresh Chrome 157.0.8103.38 both sent on 2026-11-06. The 28-ID body is also what
+// Chrome for Testing 156.0.8078.80 sends, and it matches the trust_anchor_id
+// fields of root_store.textproto from 153.0.8010.12 on.
 func TestChromeTrustAnchorIDsMatchCapture(t *testing.T) {
-	const wantBody = "00cc04d679090608839a648c9b2d010704d679090c0582df1302060582df13021308839a648c9b2d010d04d67909010582df13020d04d679090d0582df13020f08839a648c9b2d01080582df13021208839a648c9b2d010904d67909020582df13020104d679090e04d679090908839a648c9b2d010a04d679090304d679090f08839a648c9b2d010b04d67909040582df13021404d679090a08839a648c9b2d011308839a648c9b2d011204d679090704d679090808839a648c9b2d010c04d67909050582df13020e04d679090b"
+	const body152 = "00cc04d679090608839a648c9b2d010704d679090c0582df1302060582df13021308839a648c9b2d010d04d67909010582df13020d04d679090d0582df13020f08839a648c9b2d01080582df13021208839a648c9b2d010904d67909020582df13020104d679090e04d679090908839a648c9b2d010a04d679090304d679090f08839a648c9b2d010b04d67909040582df13021404d679090a08839a648c9b2d011308839a648c9b2d011204d679090704d679090808839a648c9b2d010c04d67909050582df13020e04d679090b"
+	const body153 = "00b80582df1302010582df1302060582df13020d0582df13020e0582df13020f0582df1302120582df1302130582df13021408839a648c9b2d010708839a648c9b2d010808839a648c9b2d010908839a648c9b2d010a08839a648c9b2d010b08839a648c9b2d010c08839a648c9b2d010d08839a648c9b2d011208839a648c9b2d011304d679090104d679090404d679090504d679090604d679090704d679090804d679090a04d679090b04d679090c04d679090d04d679090f"
 
-	ext, err := buildTrustAnchorsExtension(chromeRootStoreTrustAnchorIDs)
-	if err != nil {
-		t.Fatalf("build: %v", err)
+	for _, tc := range []struct {
+		major    int
+		wantBody string
+		wantIDs  int
+	}{
+		{152, body152, 32},
+		{153, body153, 28},
+		{156, body153, 28},
+		{157, body153, 28},
+	} {
+		t.Run(fmt.Sprintf("%d", tc.major), func(t *testing.T) {
+			if n := len(chromeRootStoreTrustAnchorIDs(tc.major)); n != tc.wantIDs {
+				t.Errorf("%d trust anchor IDs, want %d", n, tc.wantIDs)
+			}
+
+			ext, err := chromeExperiments{}.trustAnchorsExtension(tc.major)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			generic, ok := ext.(*utls.GenericExtension)
+			if !ok {
+				t.Fatalf("trust_anchors is %T, want *utls.GenericExtension", ext)
+			}
+			if got := fmt.Sprintf("%x", generic.Data); got != tc.wantBody {
+				t.Errorf("trust_anchors body mismatch\n  got:  %s\n  want: %s", got, tc.wantBody)
+			}
+		})
 	}
-	if got := fmt.Sprintf("%x", ext.Data); got != wantBody {
-		t.Errorf("trust_anchors body mismatch\n  got:  %s\n  want: %s", got, wantBody)
-	}
-	if len(chromeRootStoreTrustAnchorIDs) != 32 {
-		t.Errorf("%d trust anchor IDs, want 32", len(chromeRootStoreTrustAnchorIDs))
+}
+
+// TestChromeServerPaddingByVersion pins the server_padding (0x12E0) default to
+// exactly Chrome 153, with the 16000-byte request that capture carried, and
+// covers the overrides either way. Every other major from 152 to 157 must not
+// send it: the stable 154, 156, and 157 captures do not, and an 18th extension
+// under those User-Agents is the t13d1518 tell DataDome challenges. The
+// WithServerPadding(0) case is the Chrome for Testing shape, for callers who
+// knowingly want it.
+func TestChromeServerPaddingByVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		major    int
+		opts     []Option
+		wantBody string // hex; empty means the extension must be absent
+		wantJA4  string
+	}{
+		{"152", 152, nil, "", chromeJA4From152},
+		{"153", 153, nil, "3e80", chromeJA4ServerPadding},
+		{"154", 154, nil, "", chromeJA4From152},
+		{"155", 155, nil, "", chromeJA4From152},
+		{"156", 156, nil, "", chromeJA4From152},
+		{"157", 157, nil, "", chromeJA4From152},
+		{"153 outside the experiment", 153, []Option{WithoutServerPadding()}, "", chromeJA4From152},
+		{"156 enrolled like 153", 156, []Option{WithServerPadding(16000)}, "3e80", chromeJA4ServerPadding},
+		{"156 like Chrome for Testing", 156, []Option{WithServerPadding(0)}, "0000", chromeJA4ServerPadding},
+		{"157 enrolled, 4000 bytes", 157, []Option{WithServerPadding(4000)}, "0fa0", chromeJA4ServerPadding},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := presetHello(t, "chrome", fmt.Sprintf("%d.0.0.0", tc.major), PlatformMac, tc.opts...)
+
+			body, present := info.extBodies[extensionServerPadding]
+			if want := tc.wantBody != ""; present != want {
+				t.Fatalf("server_padding present = %v, want %v (extensions %v)", present, want, info.extensions)
+			}
+			if present {
+				if got := fmt.Sprintf("%x", body); got != tc.wantBody {
+					t.Errorf("server_padding body = %s, want %s", got, tc.wantBody)
+				}
+			}
+			if got := info.ja4(); got != tc.wantJA4 {
+				t.Errorf("ja4 = %q, want %q", got, tc.wantJA4)
+			}
+		})
 	}
 }
 
@@ -661,7 +745,7 @@ func TestChromeTrustAnchorOverrides(t *testing.T) {
 	}
 }
 
-// TestChromeSecChUAByVersion covers the identity half of a Chrome 151 or 152
+// TestChromeSecChUAByVersion covers the identity half of a Chrome 151 to 157
 // impersonation: the GREASE brand list is seeded by the major version, so a
 // mismatch between the sec-ch-ua brands and the User-Agent is its own tell.
 func TestChromeSecChUAByVersion(t *testing.T) {
@@ -671,14 +755,20 @@ func TestChromeSecChUAByVersion(t *testing.T) {
 	//
 	//	151: chars[8]="=", chars[9]="?", version[1]="99", order[1]={0,2,1}
 	//	152: chars[9]="?", chars[10]="_", version[2]="24", order[2]={1,0,2}
+	//	156: chars[2]=":", chars[3]="-", version[0]="8",  order[0]={0,1,2}
+	//	157: chars[3]="-", chars[4]=".", version[1]="99", order[1]={0,2,1}
 	//
-	// The 151 line is confirmed by a real Chrome 151.0.7922.174 request.
+	// The 151 line is confirmed by a real Chrome 151.0.7922.174 request, the 156
+	// line by a real headed Chrome 156.0.8078.x request, and the 157 line by a
+	// headless Chrome 157.0.8103.38 request, all read back at tls.peet.ws.
 	cases := []struct {
 		version string
 		want    string
 	}{
 		{"151.0.0.0", `"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`},
 		{"152.0.0.0", `"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"`},
+		{"156.0.0.0", `"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"`},
+		{"157.0.0.0", `"Not-A.Brand";v="99", "Google Chrome";v="157", "Chromium";v="157"`},
 	}
 
 	for _, tc := range cases {

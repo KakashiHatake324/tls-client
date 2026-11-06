@@ -121,10 +121,13 @@ func pseudoOrder(headers []string) string {
 // Chrome desktop
 // ---------------------------------------------------------------------------
 
-// TestPresetChromeDesktopLive checks Chrome 151 and 152 against real Chrome.
-// They are NOT the same: 152 adds the trust_anchors extension and a GREASE
-// signature algorithm, so it has its own JA3N and JA4. Values come from local
-// captures of Chrome 151.0.7922.174 and Chrome 152.0.7977.65 on macOS.
+// TestPresetChromeDesktopLive checks Chrome 151, 152, 156, and 157 against real
+// Chrome. 151 and 152 are NOT the same: 152 adds the trust_anchors extension and
+// a GREASE signature algorithm, so it has its own JA3N and JA4. 156 and 157
+// share the 152 shape. Values come from local captures of Chrome 151.0.7922.174
+// and Chrome 152.0.7977.65, and from tls.peet.ws readings of a real headed
+// Chrome 156.0.8078.x (whose only extra extension was a resumption PSK) and a
+// fresh Chrome 157.0.8103.38, all on macOS.
 //
 // The offline equivalent, which pins the same values without the network, is
 // TestChromeModernFingerprint.
@@ -137,10 +140,12 @@ func TestPresetChromeDesktopLive(t *testing.T) {
 		version string
 		ja4     string
 		ja3n    string
-		// peetprint is asserted only where the expected value is known. For
-		// Chrome 152 it is not: peetprint includes the signature algorithms and
-		// it is unverified whether tls.peet.ws strips the GREASE entry Chrome
-		// 152 leads with, so the value is logged instead of pinned.
+		// peetprint includes the signature algorithms. tls.peet.ws renders the
+		// GREASE value Chrome 152+ leads with as the literal token "GREASE", so
+		// the hash is stable per shape: real Chrome 157 (fresh profile) reported
+		// fc97c1cdfb1409c9a9326c1b726d1dee, and the real headed Chrome 156
+		// reading differs from it only by the resumption PSK (41) its session
+		// carried, so a fresh 152, 156, or 157 hello all hash to that value.
 		peetprint string
 	}{
 		{
@@ -150,9 +155,22 @@ func TestPresetChromeDesktopLive(t *testing.T) {
 			peetprint: "67c3e9111bed9e7f03d2f21d6d88994b",
 		},
 		{
-			version: "152.0.0.0",
-			ja4:     chromeJA4From152,
-			ja3n:    chromeJA3NTrustAnchorsHash,
+			version:   "152.0.0.0",
+			ja4:       chromeJA4From152,
+			ja3n:      chromeJA3NTrustAnchorsHash,
+			peetprint: "fc97c1cdfb1409c9a9326c1b726d1dee",
+		},
+		{
+			version:   "156.0.0.0",
+			ja4:       chromeJA4From152,
+			ja3n:      chromeJA3NTrustAnchorsHash,
+			peetprint: "fc97c1cdfb1409c9a9326c1b726d1dee",
+		},
+		{
+			version:   "157.0.0.0",
+			ja4:       chromeJA4From152,
+			ja3n:      chromeJA3NTrustAnchorsHash,
+			peetprint: "fc97c1cdfb1409c9a9326c1b726d1dee",
 		},
 	}
 

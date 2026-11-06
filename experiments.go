@@ -13,6 +13,11 @@ import (
 // draft-ietf-tls-trust-anchor-ids (BoringSSL: TLSEXT_TYPE_trust_anchors).
 const extensionTrustAnchors uint16 = 0xca34
 
+// extensionServerPadding is BoringSSL's TLSEXT_TYPE_server_padding (4832), the
+// two-byte padding request Chrome sends while the AddTLSServerHandshakePadding
+// field trial is on. See chromiumServerPaddingFrom in profiles.go.
+const extensionServerPadding uint16 = 0x12e0
+
 // ML-DSA signature schemes from draft-ietf-tls-mldsa. Chrome advertises these
 // ahead of the classical algorithms. uTLS 1.8.2 has no named constants for them.
 const (
@@ -60,16 +65,31 @@ const chromeTrustAnchorsFrom = 152
 // for implementations that follow the spec.
 const chromeGreaseSigAlgsFrom = 152
 
-// chromeRootStoreTrustAnchorIDs is the trust anchor ID list Chrome 152 sends,
-// decoded from a live capture. The IDs are dotted-decimal relative OIDs:
+// chromeTrustAnchorList153From is the first Chrome major whose compiled-in
+// Chrome Root Store carries the 28-ID trust anchor list rather than the 32-ID
+// one. net/data/ssl/chrome_root_store/root_store.textproto has 32
+// trust_anchor_id fields at 152.0.7977.85 (version_major 36) and 28 at
+// 153.0.8010.12 (version_major 38) through 157.0.8103.38 (version_major 42):
+// the Google Trust Services IDs 11129.9.2, .3, .9, and .14 are gone and nothing
+// was added. The 28-ID list is confirmed on the wire by a real headed Chrome
+// 156.0.8078.x and a fresh Chrome 157.0.8103.38 (both 2026-11-06), which sent
+// the identical 186-byte body pinned in TestChromeTrustAnchorIDsMatchCapture.
+//
+// The root store also ships through the component updater, so a long-running
+// older Chrome may have moved to the newer list; the version default here
+// follows the store compiled into each release.
+const chromeTrustAnchorList153From = 153
+
+// chromeRootStoreTrustAnchorIDs152 is the trust anchor ID list Chrome 152
+// sends, decoded from a live capture. The IDs are dotted-decimal relative OIDs:
 // 11129.9.x is Google Trust Services, 44947.2.x is ISRG (Let's Encrypt), and
 // 52580.200109.1.x is a third CA family.
 //
-// Chrome iterates a hash set to build this, so the order differs between
-// browser processes while the set does not. The order below is one real
+// Chrome 152 iterated a hash set to build this, so the order differed between
+// browser processes while the set did not. The order below is one real
 // capture's; since neither JA3 nor JA4 covers extension bodies, it affects only
 // the raw bytes.
-var chromeRootStoreTrustAnchorIDs = []string{
+var chromeRootStoreTrustAnchorIDs152 = []string{
 	"11129.9.6", "52580.200109.1.7", "11129.9.12", "44947.2.6",
 	"44947.2.19", "52580.200109.1.13", "11129.9.1", "44947.2.13",
 	"11129.9.13", "44947.2.15", "52580.200109.1.8", "44947.2.18",
@@ -80,18 +100,46 @@ var chromeRootStoreTrustAnchorIDs = []string{
 	"52580.200109.1.12", "11129.9.5", "44947.2.14", "11129.9.11",
 }
 
+// chromeRootStoreTrustAnchorIDs153 is the list Chrome 153 and up send: the 152
+// set minus 11129.9.2, .3, .9, and .14. Unlike 152, the order is stable: it was
+// byte-identical across five launches of three builds (Chrome 156 headed, Chrome
+// for Testing 156 twice, Chrome 157 twice) and is sorted by the binary encoding
+// of each ID, so it is reproduced verbatim.
+var chromeRootStoreTrustAnchorIDs153 = []string{
+	"44947.2.1", "44947.2.6", "44947.2.13", "44947.2.14",
+	"44947.2.15", "44947.2.18", "44947.2.19", "44947.2.20",
+	"52580.200109.1.7", "52580.200109.1.8", "52580.200109.1.9", "52580.200109.1.10",
+	"52580.200109.1.11", "52580.200109.1.12", "52580.200109.1.13", "52580.200109.1.18",
+	"52580.200109.1.19", "11129.9.1", "11129.9.4", "11129.9.5",
+	"11129.9.6", "11129.9.7", "11129.9.8", "11129.9.10",
+	"11129.9.11", "11129.9.12", "11129.9.13", "11129.9.15",
+}
+
+// chromeRootStoreTrustAnchorIDs returns the list the Chrome Root Store compiled
+// into a given major advertises.
+func chromeRootStoreTrustAnchorIDs(majorNum int) []string {
+	if majorNum >= chromeTrustAnchorList153From {
+		return chromeRootStoreTrustAnchorIDs153
+	}
+	return chromeRootStoreTrustAnchorIDs152
+}
+
 // chromeExperiments holds ClientHello features whose presence depends on the
 // Chrome version or on a Finch field trial, together with any caller override.
 type chromeExperiments struct {
-	trustAnchors    []string
-	trustAnchorsSet bool
-	trustAnchorsOff bool
-	mldsa           bool
-	mldsaSet        bool
+	trustAnchors     []string
+	trustAnchorsSet  bool
+	trustAnchorsOff  bool
+	mldsa            bool
+	mldsaSet         bool
+	serverPadding    uint16
+	serverPaddingSet bool
+	serverPaddingOff bool
 }
 
 func (e chromeExperiments) any() bool {
-	return e.trustAnchorsSet || e.trustAnchorsOff || e.mldsaSet
+	return e.trustAnchorsSet || e.trustAnchorsOff || e.mldsaSet ||
+		e.serverPaddingSet || e.serverPaddingOff
 }
 
 // usesTrustAnchors reports whether a Chrome build of this major version sends
@@ -107,12 +155,12 @@ func (e chromeExperiments) usesTrustAnchors(majorNum int) bool {
 }
 
 // trustAnchorIDs returns the IDs to advertise: the caller's list when one was
-// given, otherwise the Chrome Root Store set real Chrome 152 sends.
-func (e chromeExperiments) trustAnchorIDs() []string {
+// given, otherwise the Chrome Root Store set compiled into that Chrome major.
+func (e chromeExperiments) trustAnchorIDs(majorNum int) []string {
 	if e.trustAnchorsSet {
 		return e.trustAnchors
 	}
-	return chromeRootStoreTrustAnchorIDs
+	return chromeRootStoreTrustAnchorIDs(majorNum)
 }
 
 // usesMLDSA reports whether a Chrome build of this major version advertises the
@@ -164,7 +212,34 @@ func (e chromeExperiments) trustAnchorsExtension(majorNum int) (utls.TLSExtensio
 	if !e.usesTrustAnchors(majorNum) {
 		return nil, nil
 	}
-	return buildTrustAnchorsExtension(e.trustAnchorIDs())
+	return buildTrustAnchorsExtension(e.trustAnchorIDs(majorNum))
+}
+
+// serverPaddingExtension builds the server_padding extension for a Chrome major
+// version, or returns nil when that version does not send one. An explicit
+// WithServerPadding/WithoutServerPadding overrides the version default, which is
+// on for 153 alone; see chromiumServerPaddingFrom.
+func (e chromeExperiments) serverPaddingExtension(majorNum int) utls.TLSExtension {
+	switch {
+	case e.serverPaddingOff:
+		return nil
+	case e.serverPaddingSet:
+		return buildServerPaddingExtension(e.serverPadding)
+	case majorNum >= chromiumServerPaddingFrom && majorNum < chromiumServerPaddingUntil:
+		return buildServerPaddingExtension(chromeServerPaddingBytes153)
+	default:
+		return nil
+	}
+}
+
+// buildServerPaddingExtension encodes a server_padding request: the number of
+// padding bytes as a 16-bit big-endian integer, exactly as BoringSSL's
+// ext_server_padding_add_clienthello writes it.
+func buildServerPaddingExtension(n uint16) *utls.GenericExtension {
+	return &utls.GenericExtension{
+		Id:   extensionServerPadding,
+		Data: []byte{byte(n >> 8), byte(n)},
+	}
 }
 
 // buildTrustAnchorsExtension encodes a RequestedTrustAnchorList for the
