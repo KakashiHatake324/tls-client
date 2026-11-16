@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"math/rand/v2"
 	"net"
 	"net/url"
@@ -247,6 +248,17 @@ func parseJA3ToSpec(ja3String string) (*utls.ClientHelloSpec, error) {
 
 func applyH2Profile(t2 *http2.Transport, p *h2Profile) {
 	t2.Settings = p.Settings
+	// TLSCLIENT_H2_GREASE=1 appends the greased vendor SETTINGS parameter the
+	// real Chrome sends (captured 2026-11-15 off headless Chromium 145 against
+	// a local h2 frame dumper: 14890:<seeded 32-bit>). Chrome picks the id and
+	// value from its per-profile seed and keeps them constant for the session.
+	if os.Getenv("TLSCLIENT_H2_GREASE") != "" {
+		gval := uint32(rand.Int64N(1 << 62))
+		greased := make([]http2.Setting, 0, len(p.Settings)+1)
+		greased = append(greased, p.Settings...)
+		greased = append(greased, http2.Setting{ID: 14890, Val: gval})
+		t2.Settings = greased
+	}
 	t2.MaxHeaderListSize = p.MaxHeaderListSize
 	t2.InitialWindowSize = p.InitialWindowSize
 	t2.HeaderTableSize = p.HeaderTableSize

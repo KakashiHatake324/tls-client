@@ -2,6 +2,8 @@ package tlsclient
 
 import (
 	"fmt"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -849,6 +851,115 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 //
 // uTLS HelloChrome_Auto still emits the 132-149 shape, so it is no longer a
 // current-Chrome fingerprint on its own.
+// chromeExtOrder returns the ClientHello extension order to use for a Chrome
+// spec.
+//
+// THE PROBLEM WITH THE LIBRARY SHUFFLE. utls.ShuffleChromeTLSExtensions picks a
+// UNIFORM RANDOM permutation of every non-GREASE extension, once per spec
+// construction. That produces orders real Chrome cannot — e.g. key_share
+// separated from supported_groups by ten extensions, or renegotiation_info in
+// slot 3 — and a TLS front-end that matches the extension ORDER (JA3 includes
+// it; peetprint's order score includes it) sees a new, mostly-impossible
+// Chrome fingerprint on every connection. Captured comparison 2026-11-15:
+// headless Chromium JA3 ...11-27-18-51764-43-10-17613-16-23-45-13-65037-35-51-5-65281...
+// vs a fresh shuffle here ...43-27-65281-17613-10-51764-18-13-16-11-65037-35-23-5-51-45...
+//
+// TLSCLIENT_CHROME_EXT_ORDER=fixed pins the exact wire order captured from the
+// Chromium build that passes the Cloudflare "b" challenge channel; any other
+// value (unset included) keeps the historical library shuffle.
+// chromeExtID maps a spec extension to its wire ID where the type is known, so
+// the fixed order can rank it. utls exposes no ID accessor on TLSExtension,
+// hence the switch. GenericExtension reports its Id field (trust_anchors is
+// built with one); an unrecognised extension reports ok=false and is left
+// after the pinned block.
+func chromeExtID(e utls.TLSExtension) (uint16, bool) {
+	switch v := e.(type) {
+	case *utls.SNIExtension:
+		return 0, true
+	case *utls.ExtendedMasterSecretExtension:
+		return 23, true
+	case *utls.RenegotiationInfoExtension:
+		return 65281, true
+	case *utls.SupportedCurvesExtension:
+		return 10, true
+	case *utls.SupportedPointsExtension:
+		return 11, true
+	case *utls.SessionTicketExtension:
+		return 35, true
+	case *utls.ALPNExtension:
+		return 16, true
+	case *utls.StatusRequestExtension:
+		return 5, true
+	case *utls.SignatureAlgorithmsExtension:
+		return 13, true
+	case *utls.SCTExtension:
+		return 18, true
+	case *utls.KeyShareExtension:
+		return 51, true
+	case *utls.PSKKeyExchangeModesExtension:
+		return 45, true
+	case *utls.SupportedVersionsExtension:
+		return 43, true
+	case *utls.UtlsCompressCertExtension:
+		return 27, true
+	case *utls.ApplicationSettingsExtensionNew:
+		return 17613, true
+	case *utls.ApplicationSettingsExtension:
+		return 17513, true
+	case *utls.GREASEEncryptedClientHelloExtension:
+		return 65037, true
+	case *utls.GenericExtension:
+		return v.Id, true
+	}
+	return 0, false
+}
+
+func chromeExtOrder(exts []utls.TLSExtension) []utls.TLSExtension {
+	if os.Getenv("TLSCLIENT_CHROME_EXT_ORDER") != "fixed" {
+		return utls.ShuffleChromeTLSExtensions(exts)
+	}
+	// Chrome wire order, GREASE and SNI stripped (they stay pinned in place):
+	order := []uint16{11, 27, 18, 51764, 43, 10, 17613, 16, 23, 45, 13, 65037, 35, 51, 5, 65281}
+	rank := make(map[uint16]int, len(order))
+	for i, id := range order {
+		rank[id] = i
+	}
+	out := make([]utls.TLSExtension, 0, len(exts))
+	out = append(out, exts[0]) // leading GREASE
+	var sni, rest utls.TLSExtension
+	var mid []utls.TLSExtension
+	for _, e := range exts[1:] {
+		if _, isGREASE := e.(*utls.UtlsGREASEExtension); isGREASE {
+			continue // trailing GREASE; re-appended after the block
+		}
+		id, ok := chromeExtID(e)
+		if !ok {
+			rest = e
+			continue
+		}
+		if id == 0 {
+			sni = e
+			continue
+		}
+		if _, pinned := rank[id]; !pinned {
+			rest = e
+			continue
+		}
+		mid = append(mid, e)
+	}
+	sort.SliceStable(mid, func(i, j int) bool {
+		li, _ := chromeExtID(mid[i])
+		lj, _ := chromeExtID(mid[j])
+		return rank[li] < rank[lj]
+	})
+	out = append(out, sni)
+	out = append(out, mid...)
+	if rest != nil {
+		out = append(out, rest)
+	}
+	return append(out, &utls.UtlsGREASEExtension{})
+}
+
 func chrome133TLSSpec(majorNum int, exp chromeExperiments) (*utls.ClientHelloSpec, error) {
 	trustAnchors, err := exp.trustAnchorsExtension(majorNum)
 	if err != nil {
@@ -933,7 +1044,7 @@ func chrome133TLSSpec(majorNum int, exp chromeExperiments) (*utls.ClientHelloSpe
 			utls.TLS_RSA_WITH_AES_256_CBC_SHA,
 		},
 		CompressionMethods: []byte{0x00},
-		Extensions:         utls.ShuffleChromeTLSExtensions(exts),
+		Extensions:         chromeExtOrder(exts),
 	}, nil
 }
 
