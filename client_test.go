@@ -121,13 +121,17 @@ func pseudoOrder(headers []string) string {
 // Chrome desktop
 // ---------------------------------------------------------------------------
 
-// TestPresetChromeDesktopLive checks Chrome 151, 152, 156, and 157 against real
-// Chrome. 151 and 152 are NOT the same: 152 adds the trust_anchors extension and
-// a GREASE signature algorithm, so it has its own JA3N and JA4. 156 and 157
-// share the 152 shape. Values come from local captures of Chrome 151.0.7922.174
-// and Chrome 152.0.7977.65, and from tls.peet.ws readings of a real headed
-// Chrome 156.0.8078.x (whose only extra extension was a resumption PSK) and a
-// fresh Chrome 157.0.8103.38, all on macOS.
+// TestPresetChromeDesktopLive checks Chrome 151, 152, 156, 157, and 158 against
+// real Chrome. 151 and 152 are NOT the same: 152 adds the trust_anchors extension
+// and a GREASE signature algorithm, so it has its own JA3N and JA4. 156, 157, and
+// 158 share the 152 shape. Values come from local captures of Chrome
+// 151.0.7922.174 and Chrome 152.0.7977.65, from tls.peet.ws readings of a real
+// headed Chrome 156.0.8078.x (whose only extra extension was a resumption PSK)
+// and a fresh Chrome 157.0.8103.38, and from a cmd/hellodump capture of a fresh
+// stable Chrome 158.0.8127.37 (12 hellos, 2026-11-24), all on macOS. The 158
+// peetprint was recomputed from those hellos in tls.peet.ws's format (the same
+// recomputation reproduces the recorded hash of the saved tls_peet.json capture),
+// and every one of the 12 hashes to the 157 value.
 //
 // The offline equivalent, which pins the same values without the network, is
 // TestChromeModernFingerprint.
@@ -145,7 +149,7 @@ func TestPresetChromeDesktopLive(t *testing.T) {
 		// the hash is stable per shape: real Chrome 157 (fresh profile) reported
 		// fc97c1cdfb1409c9a9326c1b726d1dee, and the real headed Chrome 156
 		// reading differs from it only by the resumption PSK (41) its session
-		// carried, so a fresh 152, 156, or 157 hello all hash to that value.
+		// carried, so a fresh 152, 156, 157, or 158 hello all hash to that value.
 		peetprint string
 	}{
 		{
@@ -168,6 +172,12 @@ func TestPresetChromeDesktopLive(t *testing.T) {
 		},
 		{
 			version:   "157.0.0.0",
+			ja4:       chromeJA4From152,
+			ja3n:      chromeJA3NTrustAnchorsHash,
+			peetprint: "fc97c1cdfb1409c9a9326c1b726d1dee",
+		},
+		{
+			version:   "158.0.0.0",
 			ja4:       chromeJA4From152,
 			ja3n:      chromeJA3NTrustAnchorsHash,
 			peetprint: "fc97c1cdfb1409c9a9326c1b726d1dee",

@@ -13,15 +13,23 @@ import (
 )
 
 // currentChromeMajor is the latest Chrome stable major version this package has
-// been verified against. 157 went stable on 2026-11-03 (Chrome has shipped a new
-// major every two weeks since 153) and was captured on 2026-11-06 from the stable
-// 157.0.8103.38 binary on fresh macOS profiles: 9 hellos through cmd/hellodump
-// and 8 through tls.peet.ws. 156 was read the same day from a real, headed,
-// Finch-seeded Chrome 156.0.8078.x. Used as the default when no explicit version
-// is available (e.g. JA3 mode). Every version from 120 up shares the same HTTP/2
-// profile, so bumping this is documentation rather than a behavior change for
-// H2, and the ClientHello has not moved since 154.
-const currentChromeMajor = 157
+// been verified against. 158 was captured on 2026-11-24 from the branded stable
+// 158.0.8127.37 binary (com.google.Chrome, KSChannelID "universal") on a fresh
+// macOS profile, headless, two launches: 12 hellos through cmd/hellodump, every
+// one identical to 157 — JA3N bd4930bd9b000ee684830e44bab76fdf, JA4
+// t13d1517h2_8daaf6152771_cb7bf5808d99, peetprint
+// fc97c1cdfb1409c9a9326c1b726d1dee, the 28-ID trust_anchors body byte-for-byte,
+// and no server_padding. (hellodump's own JA4 keeps the GREASE signature
+// algorithm in JA4_c, so it varies per hello; the value above drops GREASE as the
+// JA4 spec does.) Its HTTP/2 frames (1:65536;2:0;4:6291456;6:262144|15663105|0|
+// m,a,s,p) and sec-ch-ua were read the same day from local listeners. 157 went
+// stable on 2026-11-03 and was captured on 2026-11-06 from the stable
+// 157.0.8103.38 binary (9 hellodump and 8 tls.peet.ws hellos); 156 the same day
+// from a real, headed, Finch-seeded Chrome 156.0.8078.x. Used as the default when
+// no explicit version is available (e.g. JA3 mode). Every version from 120 up
+// shares the same HTTP/2 profile, so bumping this is documentation rather than a
+// behavior change for H2, and the ClientHello has not moved since 154.
+const currentChromeMajor = 158
 
 // chromiumModernSpecFrom is the first Chromium major version that sends the
 // current ClientHello shape: MLKEM768 key share, ALPS codepoint 17613, GREASE
@@ -58,6 +66,8 @@ this package sends BoringSSL's server_padding extension for by default.
 	        seeded profile                   2026-11-06  absent (tls.peet.ws, 17 extensions + a resumption PSK)
 	    157 stable 157.0.8103.38, fresh
 	        profile, headless, two launches  2026-11-06  absent (hellodump, 9 hellos)
+	    158 stable 158.0.8127.37, fresh
+	        profile, headless, two launches  2026-11-24  absent (hellodump, 12 hellos)
 	    Chrome for Testing 156.0.8078.80,
 	        fresh profile, headless          2026-11-06  PRESENT, payload 0000, 9/9 hellos
 
@@ -199,7 +209,7 @@ func chromiumProfile(brand, version, osVersion string, platform Platform, exp ch
 //	     real Chrome 153 did; 18 extensions. A Finch arm, not a version feature.
 //	     See chromiumServerPaddingFrom; override with WithServerPadding and
 //	     WithoutServerPadding.
-//	154-157: back to the 152 shape. The Chrome Root Store list inside
+//	154-158: back to the 152 shape. The Chrome Root Store list inside
 //	     trust_anchors has 28 IDs from 153 on; see chromeTrustAnchorList153From.
 //
 // The cipher list and supported_groups have not moved since 132. Extensions and
@@ -833,7 +843,7 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 //	153:     18 ext (server_padding, a Finch arm; see chromiumServerPaddingFrom)
 //	         JA3N a3a3161a080b73bda9cc285fb367fcc0
 //	         JA4  t13d1518h2_8daaf6152771_4980c97edce0
-//	154-157: back to the 152 shape. The Chrome Root Store list inside
+//	154-158: back to the 152 shape. The Chrome Root Store list inside
 //	         trust_anchors is down from 32 IDs to 28 from 153 on, which no
 //	         fingerprint can see (bodies are not hashed)
 //	         JA3N bd4930bd9b000ee684830e44bab76fdf
@@ -842,7 +852,8 @@ func newIOSSpecFunc(majorNum int) func() *utls.ClientHelloSpec {
 // Every value above comes from a live capture on macOS: Chrome 151.0.7922.174
 // (headed and headless, 2026-08-30), Chrome 152.0.7977.65 (2026-08-31), Chrome
 // 153 (headed, 2026-09-27), Chrome 154 (2026-09-30), a real headed Chrome
-// 156.0.8078.x and a fresh Chrome 157.0.8103.38 (both 2026-11-06).
+// 156.0.8078.x and a fresh Chrome 157.0.8103.38 (both 2026-11-06), and a fresh
+// Chrome 158.0.8127.37 (2026-11-24).
 //
 // The 150 row is the cautionary one: JA3 and JA3N do not encode signature
 // algorithms, so they are byte-identical either side of that change and report a
@@ -925,8 +936,12 @@ func chromeExtOrder(exts []utls.TLSExtension) []utls.TLSExtension {
 		rank[id] = i
 	}
 	out := make([]utls.TLSExtension, 0, len(exts))
+	if len(exts) == 0 {
+		return out
+	}
 	out = append(out, exts[0]) // leading GREASE
-	var sni, rest utls.TLSExtension
+	var sni utls.TLSExtension
+	var unranked []utls.TLSExtension
 	var mid []utls.TLSExtension
 	for _, e := range exts[1:] {
 		if _, isGREASE := e.(*utls.UtlsGREASEExtension); isGREASE {
@@ -934,7 +949,7 @@ func chromeExtOrder(exts []utls.TLSExtension) []utls.TLSExtension {
 		}
 		id, ok := chromeExtID(e)
 		if !ok {
-			rest = e
+			unranked = append(unranked, e)
 			continue
 		}
 		if id == 0 {
@@ -942,7 +957,7 @@ func chromeExtOrder(exts []utls.TLSExtension) []utls.TLSExtension {
 			continue
 		}
 		if _, pinned := rank[id]; !pinned {
-			rest = e
+			unranked = append(unranked, e)
 			continue
 		}
 		mid = append(mid, e)
@@ -952,11 +967,11 @@ func chromeExtOrder(exts []utls.TLSExtension) []utls.TLSExtension {
 		lj, _ := chromeExtID(mid[j])
 		return rank[li] < rank[lj]
 	})
-	out = append(out, sni)
-	out = append(out, mid...)
-	if rest != nil {
-		out = append(out, rest)
+	if sni != nil {
+		out = append(out, sni)
 	}
+	out = append(out, mid...)
+	out = append(out, unranked...)
 	return append(out, &utls.UtlsGREASEExtension{})
 }
 

@@ -169,8 +169,8 @@ func WithoutTrustAnchors() Option {
 // Real Chrome sends this only while enrolled in the AddTLSServerHandshakePadding
 // Finch experiment, so it is a property of a client's variations seed rather
 // than of the Chrome version: a headed Chrome 153 was captured sending it with
-// n=16000 on every connection, while stable 154, 156, and 157 captures do not
-// send it at all. The presets therefore send it by default for 153 alone. Use
+// n=16000 on every connection, while stable 154, 156, 157, and 158 captures do
+// not send it at all. The presets therefore send it by default for 153 alone. Use
 // this to reproduce an enrolled client at another version, or to change the 153
 // request size. It adds an 18th extension and moves JA4 from
 // t13d1517h2_8daaf6152771_cb7bf5808d99 to t13d1518h2_8daaf6152771_4980c97edce0
@@ -234,7 +234,7 @@ func WithoutMLDSA() Option {
 // Chromium presets only, and no-op in JA3 mode, which carries no browser
 // identity to derive a User-Agent from.
 //
-//	client, _ := tlsclient.NewClientWithPreset("chrome", "157.0.0.0", "mac",
+//	client, _ := tlsclient.NewClientWithPreset("chrome", "158.0.0.0", "mac",
 //	    tlsclient.WithGoogleHeaders(tlsclient.GoogleHeaders{
 //	        ClientData: "CM6XywE=",                    // captured, or ClientDataHeader(...)
 //	        Validation: "S7hKo5PWMhrUgzQMwm5wWB2agsI=", // captured; see BrowserValidation

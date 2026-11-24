@@ -73,7 +73,10 @@ const chromeGreaseSigAlgsFrom = 152
 // the Google Trust Services IDs 11129.9.2, .3, .9, and .14 are gone and nothing
 // was added. The 28-ID list is confirmed on the wire by a real headed Chrome
 // 156.0.8078.x and a fresh Chrome 157.0.8103.38 (both 2026-11-06), which sent
-// the identical 186-byte body pinned in TestChromeTrustAnchorIDsMatchCapture.
+// the identical 186-byte body pinned in TestChromeTrustAnchorIDsMatchCapture, and
+// by a fresh stable Chrome 158.0.8127.37 (2026-11-24), which sent that same body
+// in all 12 captured hellos. 158's root_store.textproto was not read, so its
+// version_major is not recorded here; only the wire body is.
 //
 // The root store also ships through the component updater, so a long-running
 // older Chrome may have moved to the newer list; the version default here
@@ -102,9 +105,9 @@ var chromeRootStoreTrustAnchorIDs152 = []string{
 
 // chromeRootStoreTrustAnchorIDs153 is the list Chrome 153 and up send: the 152
 // set minus 11129.9.2, .3, .9, and .14. Unlike 152, the order is stable: it was
-// byte-identical across five launches of three builds (Chrome 156 headed, Chrome
-// for Testing 156 twice, Chrome 157 twice) and is sorted by the binary encoding
-// of each ID, so it is reproduced verbatim.
+// byte-identical across seven launches of four builds (Chrome 156 headed, Chrome
+// for Testing 156 twice, Chrome 157 twice, Chrome 158 twice) and is sorted by the
+// binary encoding of each ID, so it is reproduced verbatim.
 var chromeRootStoreTrustAnchorIDs153 = []string{
 	"44947.2.1", "44947.2.6", "44947.2.13", "44947.2.14",
 	"44947.2.15", "44947.2.18", "44947.2.19", "44947.2.20",
